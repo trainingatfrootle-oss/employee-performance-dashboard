@@ -1,0 +1,2023 @@
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  AlertCircle,
+  BarChart2,
+  CalendarDays,
+  CheckCircle2,
+  ClipboardList,
+  Download,
+  FileSpreadsheet,
+  Loader2,
+  Phone,
+  TrendingUp,
+  Trophy,
+  Upload,
+  Users,
+  X,
+} from "lucide-react";
+import { useRef, useState } from "react";
+import { toast } from "sonner";
+import type {
+  Attendance,
+  Employee,
+  FeedbackEntry,
+  Performance,
+  SWOT,
+  SalesRecord,
+  TopPerformer,
+} from "../backend.d";
+import {
+  Variant_accessories_extendedWarranty,
+  Variant_active_onHold,
+  Variant_eod_daysBrief_attendance,
+  Variant_tineco_ecovacs_coway_kuvings_instant,
+} from "../backend.d";
+import { useActor } from "../hooks/useActor";
+import { XLSX } from "../lib/xlsxShim";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function cleanNumeric(val: unknown): string {
+  return String(val ?? "")
+    .replace(/₹/g, "")
+    .replace(/,/g, "")
+    .trim();
+}
+
+function str(val: unknown): string {
+  return String(val ?? "").trim();
+}
+
+function downloadTemplate(
+  filename: string,
+  headers: string[],
+  exampleRow: (string | number)[],
+) {
+  const ws = XLSX.utils.aoa_to_sheet([headers, exampleRow]);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Template");
+  XLSX.writeFile(wb, filename);
+}
+
+async function parseWorkbook(file: File): Promise<Record<string, unknown>[]> {
+  let workbook: any;
+  if (file.name.endsWith(".csv")) {
+    const text = await file.text();
+    workbook = XLSX.read(text, { type: "string" });
+  } else {
+    const buffer = await file.arrayBuffer();
+    workbook = XLSX.read(buffer, { type: "array" });
+  }
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  return XLSX.utils.sheet_to_json(sheet, {
+    defval: "",
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Reusable Upload Section UI
+// ---------------------------------------------------------------------------
+
+interface PreviewRowBase {
+  errors: string[];
+}
+
+interface UploadSectionProps<T extends PreviewRowBase> {
+  tabId: string;
+  title: string;
+  description: string;
+  icon: React.ReactNode;
+  templateFilename: string;
+  templateHeaders: string[];
+  templateExample: (string | number)[];
+  parsedRows: T[] | null;
+  parseError: string | null;
+  fileName: string | null;
+  isPending: boolean;
+  onFileSelect: (file: File) => void;
+  onClear: () => void;
+  onConfirm: () => void;
+  tableHeaders: string[];
+  renderRow: (row: T, idx: number) => React.ReactNode;
+}
+
+function UploadSection<T extends PreviewRowBase>({
+  tabId,
+  title,
+  description,
+  icon,
+  templateFilename,
+  templateHeaders,
+  templateExample,
+  parsedRows,
+  parseError,
+  fileName,
+  isPending,
+  onFileSelect,
+  onClear,
+  onConfirm,
+  tableHeaders,
+  renderRow,
+}: UploadSectionProps<T>) {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const validRows = parsedRows?.filter((r) => r.errors.length === 0) ?? [];
+  const invalidCount = (parsedRows?.length ?? 0) - validRows.length;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-xl bg-primary/10 flex items-center justify-center">
+            {icon}
+          </div>
+          <div>
+            <h2 className="text-base font-semibold text-foreground">{title}</h2>
+            <p className="text-xs text-muted-foreground">{description}</p>
+          </div>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() =>
+            downloadTemplate(templateFilename, templateHeaders, templateExample)
+          }
+          data-ocid={`${tabId}.upload_button`}
+        >
+          <Download size={14} className="mr-1.5" />
+          Download Template
+        </Button>
+      </div>
+
+      <Card>
+        <CardContent className="pt-5 space-y-4">
+          {/* Drop Zone */}
+          {!parsedRows && (
+            <button
+              type="button"
+              className="w-full border-2 border-dashed border-border rounded-xl p-8 flex flex-col items-center gap-3 bg-muted/30 hover:bg-muted/50 transition-colors cursor-pointer"
+              onClick={() => fileInputRef.current?.click()}
+              data-ocid={`${tabId}.dropzone`}
+            >
+              <FileSpreadsheet size={36} className="text-muted-foreground" />
+              <div className="text-center">
+                <p className="text-sm font-medium text-foreground">
+                  Click to upload .xlsx or .csv
+                </p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Use the template above to ensure correct column names
+                </p>
+              </div>
+              <span className="mt-1 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border bg-background text-sm font-medium text-foreground hover:bg-muted transition-colors">
+                <Upload size={13} /> Select File
+              </span>
+            </button>
+          )}
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.csv"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) onFileSelect(file);
+              e.target.value = "";
+            }}
+            className="hidden"
+          />
+
+          {/* Parse Error */}
+          {parseError && (
+            <div
+              className="flex items-start gap-2 p-3 bg-destructive/10 border border-destructive/20 rounded-lg text-sm text-destructive"
+              data-ocid={`${tabId}.error_state`}
+            >
+              <AlertCircle size={15} className="mt-0.5 flex-shrink-0" />
+              {parseError}
+            </div>
+          )}
+
+          {/* Preview */}
+          {parsedRows && (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-sm font-medium text-foreground">
+                    Preview: {fileName}
+                  </span>
+                  <Badge variant="outline" className="text-xs">
+                    {parsedRows.length} rows
+                  </Badge>
+                  <Badge
+                    variant="outline"
+                    className="text-xs text-green-600 border-green-300"
+                  >
+                    <CheckCircle2 size={11} className="mr-1" />
+                    {validRows.length} valid
+                  </Badge>
+                  {invalidCount > 0 && (
+                    <Badge
+                      variant="outline"
+                      className="text-xs text-destructive border-destructive/30"
+                    >
+                      <AlertCircle size={11} className="mr-1" />
+                      {invalidCount} invalid
+                    </Badge>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={onClear}
+                    data-ocid={`${tabId}.cancel_button`}
+                  >
+                    <X size={13} className="mr-1" /> Clear
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={onConfirm}
+                    disabled={validRows.length === 0 || isPending}
+                    data-ocid={`${tabId}.submit_button`}
+                  >
+                    {isPending ? (
+                      <Loader2 size={13} className="mr-1 animate-spin" />
+                    ) : (
+                      <CheckCircle2 size={13} className="mr-1" />
+                    )}
+                    {isPending ? "Saving..." : "Confirm & Save"}
+                  </Button>
+                </div>
+              </div>
+
+              <ScrollArea className="h-72 rounded-lg border border-border">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/50">
+                      {tableHeaders.map((h) => (
+                        <TableHead
+                          key={h}
+                          className="text-xs whitespace-nowrap"
+                        >
+                          {h}
+                        </TableHead>
+                      ))}
+                      <TableHead className="text-xs">Status</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {
+                      // biome-ignore lint/suspicious/noArrayIndexKey: no stable id
+                      parsedRows.map((row, idx) => (
+                        <TableRow
+                          // biome-ignore lint/suspicious/noArrayIndexKey: parsed rows have no stable id
+                          key={`row-${idx}`}
+                          data-ocid={`${tabId}.item.${idx + 1}`}
+                          className={row.errors.length > 0 ? "bg-red-50" : ""}
+                        >
+                          {renderRow(row, idx)}
+                          <TableCell className="text-xs">
+                            {row.errors.length > 0 ? (
+                              <span className="text-destructive flex items-start gap-1">
+                                <AlertCircle
+                                  size={11}
+                                  className="mt-0.5 flex-shrink-0"
+                                />
+                                {row.errors.join("; ")}
+                              </span>
+                            ) : (
+                              <span className="text-green-600 flex items-center gap-1">
+                                <CheckCircle2 size={11} /> Valid
+                              </span>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    }
+                  </TableBody>
+                </Table>
+              </ScrollArea>
+            </div>
+          )}
+
+          {/* Empty state */}
+          {!parsedRows && !parseError && (
+            <div
+              className="flex flex-col items-center justify-center py-6 text-center text-muted-foreground gap-2"
+              data-ocid={`${tabId}.empty_state`}
+            >
+              <FileSpreadsheet size={28} className="opacity-30" />
+              <p className="text-xs">No file uploaded yet.</p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tab: Employee Upload
+// ---------------------------------------------------------------------------
+
+interface EmployeeRow extends PreviewRowBase {
+  fiplCode: string;
+  name: string;
+  role: string;
+  department: string;
+  fseCategory: string;
+  status: string;
+  joinDate: string;
+  avatarUrl: string;
+  region: string;
+  familyDetails: string;
+  pastExperience: string;
+}
+
+const EMPLOYEE_HEADERS = [
+  "FIPL Code",
+  "Name",
+  "Role",
+  "Department",
+  "FSE Category",
+  "Status",
+  "Joining Date (DD-MM-YYYY)",
+  "Avatar URL",
+  "Region",
+  "Family Details",
+  "Past Experience",
+];
+
+function parseEmployeeRows(rawRows: Record<string, unknown>[]): EmployeeRow[] {
+  return rawRows
+    .filter((r) => EMPLOYEE_HEADERS.some((h) => str(r[h]) !== ""))
+    .map((r) => {
+      const errors: string[] = [];
+      const fiplCode = str(r["FIPL Code"]);
+      const name = str(r.Name);
+      const status = str(r.Status);
+
+      if (!fiplCode) errors.push("FIPL Code is required");
+      if (!name) errors.push("Name is required");
+      const statusNorm = status.toLowerCase();
+      if (status && statusNorm !== "active" && statusNorm !== "on hold") {
+        errors.push('Status must be "Active" or "On Hold"');
+      }
+
+      return {
+        fiplCode,
+        name,
+        role: str(r.Role),
+        department: str(r.Department),
+        fseCategory: str(r["FSE Category"]),
+        status,
+        joinDate: str(r["Joining Date (DD-MM-YYYY)"]),
+        avatarUrl: str(r["Avatar URL"]),
+        region: str(r.Region),
+        familyDetails: str(r["Family Details"]),
+        pastExperience: str(r["Past Experience"]),
+        errors,
+      };
+    });
+}
+
+function EmployeeUploadTab() {
+  const { actor } = useActor();
+  const queryClient = useQueryClient();
+  const [parsedRows, setParsedRows] = useState<EmployeeRow[] | null>(null);
+  const [parseError, setParseError] = useState<string | null>(null);
+  const [fileName, setFileName] = useState<string | null>(null);
+
+  const mutation = useMutation({
+    mutationFn: async (records: Employee[]) => {
+      if (!actor) throw new Error("Not connected");
+      return actor.batchEmployeeUpload(records);
+    },
+    onSuccess: (result) => {
+      toast.success(
+        `${Number(result.successCount)} rows uploaded, ${Number(result.failCount)} failed`,
+      );
+      queryClient.invalidateQueries({ queryKey: ["employees"] });
+      setParsedRows(null);
+      setFileName(null);
+    },
+    onError: (err) => toast.error(`Upload failed: ${String(err)}`),
+  });
+
+  const handleFileSelect = async (file: File) => {
+    setParseError(null);
+    setParsedRows(null);
+    setFileName(file.name);
+    try {
+      const rawRows = await parseWorkbook(file);
+      if (rawRows.length === 0) {
+        setParseError("File is empty.");
+        return;
+      }
+      const missing = EMPLOYEE_HEADERS.filter((h) => !(h in rawRows[0]));
+      if (missing.length > 0) {
+        setParseError(`Missing columns: ${missing.join(", ")}`);
+        return;
+      }
+      setParsedRows(parseEmployeeRows(rawRows));
+    } catch (e) {
+      setParseError(`Failed to parse: ${String(e)}`);
+    }
+  };
+
+  const validRows = parsedRows?.filter((r) => r.errors.length === 0) ?? [];
+
+  const handleConfirm = () => {
+    const records: Employee[] = validRows.map((r) => ({
+      fiplCode: r.fiplCode,
+      name: r.name,
+      role: r.role,
+      department: r.department,
+      fseCategory: r.fseCategory,
+      status:
+        r.status.toLowerCase() === "active"
+          ? Variant_active_onHold.active
+          : Variant_active_onHold.onHold,
+      joinDate: r.joinDate,
+      avatarUrl: r.avatarUrl,
+      region: r.region,
+      familyDetails: r.familyDetails,
+      pastExperience: r.pastExperience,
+    }));
+    mutation.mutate(records);
+  };
+
+  return (
+    <UploadSection<EmployeeRow>
+      tabId="employee_upload"
+      title="Employee Upload"
+      description="Upload employee master data. FIPL Code is the unique identifier."
+      icon={<Users size={17} className="text-primary" />}
+      templateFilename="employee_template.xlsx"
+      templateHeaders={EMPLOYEE_HEADERS}
+      templateExample={[
+        "FIPL001",
+        "Rahul Sharma",
+        "Field Sales Executive",
+        "Sales",
+        "A",
+        "Active",
+        "01-01-2023",
+        "",
+        "North",
+        "Married, 2 children",
+        "5 years in FMCG",
+      ]}
+      parsedRows={parsedRows}
+      parseError={parseError}
+      fileName={fileName}
+      isPending={mutation.isPending}
+      onFileSelect={handleFileSelect}
+      onClear={() => {
+        setParsedRows(null);
+        setFileName(null);
+        setParseError(null);
+      }}
+      onConfirm={handleConfirm}
+      tableHeaders={[
+        "FIPL Code",
+        "Name",
+        "Role",
+        "Department",
+        "FSE Category",
+        "Status",
+        "Join Date",
+        "Region",
+      ]}
+      renderRow={(row) => (
+        <>
+          <TableCell className="font-mono text-xs">
+            {row.fiplCode || "—"}
+          </TableCell>
+          <TableCell className="text-sm">{row.name || "—"}</TableCell>
+          <TableCell className="text-xs">{row.role || "—"}</TableCell>
+          <TableCell className="text-xs">{row.department || "—"}</TableCell>
+          <TableCell className="text-xs">{row.fseCategory || "—"}</TableCell>
+          <TableCell className="text-xs">
+            <Badge
+              variant="outline"
+              className={`text-xs ${
+                row.status.toLowerCase() === "active"
+                  ? "text-green-600 border-green-300"
+                  : row.status.toLowerCase() === "on hold"
+                    ? "text-amber-600 border-amber-300"
+                    : "text-destructive border-destructive/30"
+              }`}
+            >
+              {row.status || "—"}
+            </Badge>
+          </TableCell>
+          <TableCell className="text-xs">{row.joinDate || "—"}</TableCell>
+          <TableCell className="text-xs">{row.region || "—"}</TableCell>
+        </>
+      )}
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tab: Parameters Upload
+// ---------------------------------------------------------------------------
+
+interface ParametersRow extends PreviewRowBase {
+  fiplCode: string;
+  name: string;
+  salesInfluenceIndex: number;
+  reviewCount: number;
+  operationalDiscipline: number;
+  productKnowledgeScore: number;
+  softSkillsScore: number;
+  demoVisits: number;
+  complaintVisits: number;
+  videoCallDemos: number;
+}
+
+const PARAMETERS_HEADERS = [
+  "FIPL Code",
+  "Name",
+  "Sales Influence Index",
+  "Review Count",
+  "Operational Discipline",
+  "Product Knowledge Score",
+  "Soft Skills Score",
+  "Total Demo Visits",
+  "Total Complaint Visits",
+  "Total Video Call Demos",
+];
+
+function parseParametersRows(
+  rawRows: Record<string, unknown>[],
+  employeeSet: Set<string>,
+): ParametersRow[] {
+  return rawRows
+    .filter((r) => PARAMETERS_HEADERS.some((h) => str(r[h]) !== ""))
+    .map((r) => {
+      const errors: string[] = [];
+      const fiplCode = str(r["FIPL Code"]);
+
+      if (!fiplCode) errors.push("FIPL Code is required");
+      else if (!employeeSet.has(fiplCode.toUpperCase()))
+        errors.push("Invalid FIPL Code");
+
+      const parseNum = (key: string, label: string): number => {
+        const raw = cleanNumeric(r[key]);
+        const n = Number(raw);
+        if (raw === "" || Number.isNaN(n) || n < 0) {
+          errors.push(`Invalid number (${label})`);
+          return 0;
+        }
+        return n;
+      };
+
+      return {
+        fiplCode,
+        name: str(r.Name),
+        salesInfluenceIndex: parseNum(
+          "Sales Influence Index",
+          "Sales Influence Index",
+        ),
+        reviewCount: parseNum("Review Count", "Review Count"),
+        operationalDiscipline: parseNum(
+          "Operational Discipline",
+          "Operational Discipline",
+        ),
+        productKnowledgeScore: parseNum(
+          "Product Knowledge Score",
+          "Product Knowledge Score",
+        ),
+        softSkillsScore: parseNum("Soft Skills Score", "Soft Skills Score"),
+        demoVisits: parseNum("Total Demo Visits", "Demo Visits"),
+        complaintVisits: parseNum("Total Complaint Visits", "Complaint Visits"),
+        videoCallDemos: parseNum("Total Video Call Demos", "Video Call Demos"),
+        errors,
+      };
+    });
+}
+
+function ParametersUploadTab() {
+  const { actor, isFetching } = useActor();
+  const queryClient = useQueryClient();
+  const [parsedRows, setParsedRows] = useState<ParametersRow[] | null>(null);
+  const [parseError, setParseError] = useState<string | null>(null);
+  const [fileName, setFileName] = useState<string | null>(null);
+
+  const { data: employees = [] } = useQuery({
+    queryKey: ["employees"],
+    queryFn: async () => (actor ? actor.getAllEmployees() : []),
+    enabled: !!actor && !isFetching,
+  });
+  const employeeSet = new Set(
+    employees.map((e) => e.fiplCode.trim().toUpperCase()),
+  );
+
+  const mutation = useMutation({
+    mutationFn: async (records: Performance[]) => {
+      if (!actor) throw new Error("Not connected");
+      return actor.batchParametersUpload(records);
+    },
+    onSuccess: (result) => {
+      toast.success(
+        `${Number(result.successCount)} rows uploaded, ${Number(result.failCount)} failed`,
+      );
+      queryClient.invalidateQueries({ queryKey: ["performances"] });
+      setParsedRows(null);
+      setFileName(null);
+    },
+    onError: (err) => toast.error(`Upload failed: ${String(err)}`),
+  });
+
+  const handleFileSelect = async (file: File) => {
+    setParseError(null);
+    setParsedRows(null);
+    setFileName(file.name);
+    try {
+      const rawRows = await parseWorkbook(file);
+      if (rawRows.length === 0) {
+        setParseError("File is empty.");
+        return;
+      }
+      const missing = PARAMETERS_HEADERS.filter((h) => !(h in rawRows[0]));
+      if (missing.length > 0) {
+        setParseError(`Missing columns: ${missing.join(", ")}`);
+        return;
+      }
+      setParsedRows(parseParametersRows(rawRows, employeeSet));
+    } catch (e) {
+      setParseError(`Failed to parse: ${String(e)}`);
+    }
+  };
+
+  const validRows = parsedRows?.filter((r) => r.errors.length === 0) ?? [];
+
+  const handleConfirm = () => {
+    const records: Performance[] = validRows.map((r) => ({
+      fiplCode: r.fiplCode,
+      salesInfluenceIndex: r.salesInfluenceIndex,
+      reviewCount: BigInt(Math.round(r.reviewCount)),
+      operationalDiscipline: r.operationalDiscipline,
+      productKnowledgeScore: r.productKnowledgeScore,
+      softSkillsScore: r.softSkillsScore,
+      demoVisits: BigInt(Math.round(r.demoVisits)),
+      complaintVisits: BigInt(Math.round(r.complaintVisits)),
+      videoCallDemos: BigInt(Math.round(r.videoCallDemos)),
+    }));
+    mutation.mutate(records);
+  };
+
+  return (
+    <UploadSection<ParametersRow>
+      tabId="parameters_upload"
+      title="Parameters Upload (FSE Performance)"
+      description="Upload FSE performance metrics. All numeric fields must be valid non-negative numbers."
+      icon={<BarChart2 size={17} className="text-primary" />}
+      templateFilename="parameters_template.xlsx"
+      templateHeaders={PARAMETERS_HEADERS}
+      templateExample={[
+        "FIPL001",
+        "Rahul Sharma",
+        85,
+        12,
+        90,
+        88,
+        76,
+        24,
+        5,
+        10,
+      ]}
+      parsedRows={parsedRows}
+      parseError={parseError}
+      fileName={fileName}
+      isPending={mutation.isPending}
+      onFileSelect={handleFileSelect}
+      onClear={() => {
+        setParsedRows(null);
+        setFileName(null);
+        setParseError(null);
+      }}
+      onConfirm={handleConfirm}
+      tableHeaders={[
+        "FIPL Code",
+        "Name",
+        "SII",
+        "Reviews",
+        "Op. Discipline",
+        "Product Score",
+        "Soft Skills",
+        "Demo",
+        "Complaint",
+        "Video",
+      ]}
+      renderRow={(row) => (
+        <>
+          <TableCell className="font-mono text-xs">
+            {row.fiplCode || "—"}
+          </TableCell>
+          <TableCell className="text-sm">{row.name || "—"}</TableCell>
+          <TableCell className="text-xs text-right">
+            {row.salesInfluenceIndex}
+          </TableCell>
+          <TableCell className="text-xs text-right">
+            {row.reviewCount}
+          </TableCell>
+          <TableCell className="text-xs text-right">
+            {row.operationalDiscipline}
+          </TableCell>
+          <TableCell className="text-xs text-right">
+            {row.productKnowledgeScore}
+          </TableCell>
+          <TableCell className="text-xs text-right">
+            {row.softSkillsScore}
+          </TableCell>
+          <TableCell className="text-xs text-right">{row.demoVisits}</TableCell>
+          <TableCell className="text-xs text-right">
+            {row.complaintVisits}
+          </TableCell>
+          <TableCell className="text-xs text-right">
+            {row.videoCallDemos}
+          </TableCell>
+        </>
+      )}
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tab: Attendance Upload
+// ---------------------------------------------------------------------------
+
+const ATTENDANCE_LAB_TYPES = [
+  "Attendance Lapses",
+  "EOD Picture Lapses",
+  "Days Brief Lapses",
+];
+
+interface AttendanceRow extends PreviewRowBase {
+  fiplCode: string;
+  fseName: string;
+  labType: string;
+  daysOff: number;
+  reason: string;
+  date: string;
+}
+
+const ATTENDANCE_HEADERS = [
+  "FIPL Code",
+  "FSE Name",
+  "Type of Lapses",
+  "Days Taken Off",
+  "Reason for Day Off",
+  "Date (DD-MM-YYYY)",
+];
+
+function parseAttendanceRows(
+  rawRows: Record<string, unknown>[],
+  employeeSet: Set<string>,
+): AttendanceRow[] {
+  return rawRows
+    .filter((r) => ATTENDANCE_HEADERS.some((h) => str(r[h]) !== ""))
+    .map((r) => {
+      const errors: string[] = [];
+      const fiplCode = str(r["FIPL Code"]);
+      const labType = str(r["Type of Lapses"]);
+      const daysRaw = cleanNumeric(r["Days Taken Off"]);
+      const days = Number(daysRaw);
+
+      if (!fiplCode) errors.push("FIPL Code is required");
+      else if (!employeeSet.has(fiplCode.toUpperCase()))
+        errors.push("Invalid FIPL Code");
+
+      if (!ATTENDANCE_LAB_TYPES.includes(labType)) {
+        errors.push(`Type must be one of: ${ATTENDANCE_LAB_TYPES.join(", ")}`);
+      }
+      if (daysRaw === "" || Number.isNaN(days) || days < 0) {
+        errors.push("Days Taken Off must be >= 0");
+      }
+
+      return {
+        fiplCode,
+        fseName: str(r["FSE Name"]),
+        labType,
+        daysOff: Number.isNaN(days) ? 0 : days,
+        reason: str(r["Reason for Day Off"]),
+        date: str(r["Date (DD-MM-YYYY)"]),
+        errors,
+      };
+    });
+}
+
+function AttendanceUploadTab() {
+  const { actor, isFetching } = useActor();
+  const queryClient = useQueryClient();
+  const [parsedRows, setParsedRows] = useState<AttendanceRow[] | null>(null);
+  const [parseError, setParseError] = useState<string | null>(null);
+  const [fileName, setFileName] = useState<string | null>(null);
+
+  const { data: employees = [] } = useQuery({
+    queryKey: ["employees"],
+    queryFn: async () => (actor ? actor.getAllEmployees() : []),
+    enabled: !!actor && !isFetching,
+  });
+  const employeeSet = new Set(
+    employees.map((e) => e.fiplCode.trim().toUpperCase()),
+  );
+
+  const mutation = useMutation({
+    mutationFn: async (records: Attendance[]) => {
+      if (!actor) throw new Error("Not connected");
+      return actor.batchAttendanceUpload(records);
+    },
+    onSuccess: (result) => {
+      toast.success(
+        `${Number(result.successCount)} rows uploaded, ${Number(result.failCount)} failed`,
+      );
+      queryClient.invalidateQueries({ queryKey: ["attendance"] });
+      setParsedRows(null);
+      setFileName(null);
+    },
+    onError: (err) => toast.error(`Upload failed: ${String(err)}`),
+  });
+
+  const handleFileSelect = async (file: File) => {
+    setParseError(null);
+    setParsedRows(null);
+    setFileName(file.name);
+    try {
+      const rawRows = await parseWorkbook(file);
+      if (rawRows.length === 0) {
+        setParseError("File is empty.");
+        return;
+      }
+      const missing = ATTENDANCE_HEADERS.filter((h) => !(h in rawRows[0]));
+      if (missing.length > 0) {
+        setParseError(`Missing columns: ${missing.join(", ")}`);
+        return;
+      }
+      setParsedRows(parseAttendanceRows(rawRows, employeeSet));
+    } catch (e) {
+      setParseError(`Failed to parse: ${String(e)}`);
+    }
+  };
+
+  const validRows = parsedRows?.filter((r) => r.errors.length === 0) ?? [];
+
+  const labTypeMap: Record<string, Variant_eod_daysBrief_attendance> = {
+    "Attendance Lapses": Variant_eod_daysBrief_attendance.attendance,
+    "EOD Picture Lapses": Variant_eod_daysBrief_attendance.eod,
+    "Days Brief Lapses": Variant_eod_daysBrief_attendance.daysBrief,
+  };
+
+  const handleConfirm = () => {
+    const records: Attendance[] = validRows.map((r) => ({
+      recordId: 0n,
+      fiplCode: r.fiplCode,
+      labType: labTypeMap[r.labType],
+      daysOff: BigInt(Math.round(r.daysOff)),
+      reason: r.reason,
+      date: r.date,
+    }));
+    mutation.mutate(records);
+  };
+
+  return (
+    <UploadSection<AttendanceRow>
+      tabId="attendance_upload"
+      title="Attendance Upload"
+      description="Upload attendance lapse records. Valid lapse types: Attendance, EOD Picture, Days Brief."
+      icon={<CalendarDays size={17} className="text-primary" />}
+      templateFilename="attendance_template.xlsx"
+      templateHeaders={ATTENDANCE_HEADERS}
+      templateExample={[
+        "FIPL001",
+        "Rahul Sharma",
+        "Attendance Lapses",
+        1,
+        "Personal leave",
+        "15-03-2024",
+      ]}
+      parsedRows={parsedRows}
+      parseError={parseError}
+      fileName={fileName}
+      isPending={mutation.isPending}
+      onFileSelect={handleFileSelect}
+      onClear={() => {
+        setParsedRows(null);
+        setFileName(null);
+        setParseError(null);
+      }}
+      onConfirm={handleConfirm}
+      tableHeaders={[
+        "FIPL Code",
+        "FSE Name",
+        "Type of Lapses",
+        "Days Off",
+        "Reason",
+        "Date",
+      ]}
+      renderRow={(row) => (
+        <>
+          <TableCell className="font-mono text-xs">
+            {row.fiplCode || "—"}
+          </TableCell>
+          <TableCell className="text-sm">{row.fseName || "—"}</TableCell>
+          <TableCell className="text-xs">{row.labType || "—"}</TableCell>
+          <TableCell className="text-xs text-right">{row.daysOff}</TableCell>
+          <TableCell className="text-xs">{row.reason || "—"}</TableCell>
+          <TableCell className="text-xs">{row.date || "—"}</TableCell>
+        </>
+      )}
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tab: SWOT Upload
+// ---------------------------------------------------------------------------
+
+interface SWOTRow extends PreviewRowBase {
+  fiplCode: string;
+  strengths: string[];
+  weaknesses: string[];
+  opportunities: string[];
+  threats: string[];
+  traits: string[];
+  problems: string[];
+  feedbacks: string[];
+  cesScore: number;
+}
+
+const SWOT_HEADERS = [
+  "FIPL Code",
+  "Strengths",
+  "Weaknesses",
+  "Opportunities",
+  "Threats",
+  "Traits",
+  "Problems",
+  "Feedbacks",
+];
+
+function splitSemi(val: unknown): string[] {
+  return str(val)
+    .split(";")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function parseSWOTRows(
+  rawRows: Record<string, unknown>[],
+  employeeSet: Set<string>,
+): SWOTRow[] {
+  return rawRows
+    .filter((r) => SWOT_HEADERS.some((h) => str(r[h]) !== ""))
+    .map((r) => {
+      const errors: string[] = [];
+      const fiplCode = str(r["FIPL Code"]);
+
+      if (!fiplCode) errors.push("FIPL Code is required");
+      else if (!employeeSet.has(fiplCode.toUpperCase()))
+        errors.push("Invalid FIPL Code");
+
+      return {
+        fiplCode,
+        strengths: splitSemi(r.Strengths),
+        weaknesses: splitSemi(r.Weaknesses),
+        opportunities: splitSemi(r.Opportunities),
+        threats: splitSemi(r.Threats),
+        traits: splitSemi(r.Traits),
+        problems: splitSemi(r.Problems),
+        feedbacks: splitSemi(r.Feedbacks),
+        cesScore: 0,
+        errors,
+      };
+    });
+}
+
+function SWOTUploadTab() {
+  const { actor, isFetching } = useActor();
+  const queryClient = useQueryClient();
+  const [parsedRows, setParsedRows] = useState<SWOTRow[] | null>(null);
+  const [parseError, setParseError] = useState<string | null>(null);
+  const [fileName, setFileName] = useState<string | null>(null);
+
+  const { data: employees = [] } = useQuery({
+    queryKey: ["employees"],
+    queryFn: async () => (actor ? actor.getAllEmployees() : []),
+    enabled: !!actor && !isFetching,
+  });
+  const employeeSet = new Set(
+    employees.map((e) => e.fiplCode.trim().toUpperCase()),
+  );
+
+  const mutation = useMutation({
+    mutationFn: async (records: SWOT[]) => {
+      if (!actor) throw new Error("Not connected");
+      return actor.batchSWOTUpload(records);
+    },
+    onSuccess: (result) => {
+      toast.success(
+        `${Number(result.successCount)} rows uploaded, ${Number(result.failCount)} failed`,
+      );
+      queryClient.invalidateQueries({ queryKey: ["swot"] });
+      setParsedRows(null);
+      setFileName(null);
+    },
+    onError: (err) => toast.error(`Upload failed: ${String(err)}`),
+  });
+
+  const handleFileSelect = async (file: File) => {
+    setParseError(null);
+    setParsedRows(null);
+    setFileName(file.name);
+    try {
+      const rawRows = await parseWorkbook(file);
+      if (rawRows.length === 0) {
+        setParseError("File is empty.");
+        return;
+      }
+      const missing = SWOT_HEADERS.filter((h) => !(h in rawRows[0]));
+      if (missing.length > 0) {
+        setParseError(`Missing columns: ${missing.join(", ")}`);
+        return;
+      }
+      setParsedRows(parseSWOTRows(rawRows, employeeSet));
+    } catch (e) {
+      setParseError(`Failed to parse: ${String(e)}`);
+    }
+  };
+
+  const validRows = parsedRows?.filter((r) => r.errors.length === 0) ?? [];
+
+  const handleConfirm = () => {
+    const records: SWOT[] = validRows.map((r) => ({
+      fiplCode: r.fiplCode,
+      strengths: r.strengths,
+      weaknesses: r.weaknesses,
+      opportunities: r.opportunities,
+      threats: r.threats,
+      traits: r.traits,
+      problems: r.problems,
+      feedbacks: r.feedbacks,
+      cesScore: r.cesScore,
+    }));
+    mutation.mutate(records);
+  };
+
+  return (
+    <UploadSection<SWOTRow>
+      tabId="swot_upload"
+      title="SWOT Upload"
+      description="Upload SWOT analysis data. Use semicolons to separate multiple values (e.g. Leadership; Communication)."
+      icon={<ClipboardList size={17} className="text-primary" />}
+      templateFilename="swot_template.xlsx"
+      templateHeaders={SWOT_HEADERS}
+      templateExample={[
+        "FIPL001",
+        "Team player;Leadership",
+        "Needs improvement;Time management",
+        "Upselling;Cross-sell",
+        "Competition;Market shift",
+        "Analytical;Detail-oriented",
+        "Delayed follow-up",
+        "satisfaction|high|Customer happy;service|medium|Response slow",
+      ]}
+      parsedRows={parsedRows}
+      parseError={parseError}
+      fileName={fileName}
+      isPending={mutation.isPending}
+      onFileSelect={handleFileSelect}
+      onClear={() => {
+        setParsedRows(null);
+        setFileName(null);
+        setParseError(null);
+      }}
+      onConfirm={handleConfirm}
+      tableHeaders={[
+        "FIPL Code",
+        "Strengths",
+        "Weaknesses",
+        "Opportunities",
+        "Threats",
+        "Traits",
+        "Problems",
+        "Feedbacks",
+      ]}
+      renderRow={(row) => (
+        <>
+          <TableCell className="font-mono text-xs">
+            {row.fiplCode || "2014"}
+          </TableCell>
+          <TableCell className="text-xs">
+            {row.strengths.join("; ") || "2014"}
+          </TableCell>
+          <TableCell className="text-xs">
+            {row.weaknesses.join("; ") || "2014"}
+          </TableCell>
+          <TableCell className="text-xs">
+            {row.opportunities.join("; ") || "2014"}
+          </TableCell>
+          <TableCell className="text-xs">
+            {row.threats.join("; ") || "2014"}
+          </TableCell>
+          <TableCell className="text-xs">
+            {row.traits.join("; ") || "2014"}
+          </TableCell>
+          <TableCell className="text-xs">
+            {row.problems.join("; ") || "2014"}
+          </TableCell>
+          <TableCell className="text-xs">
+            {row.feedbacks.join("; ") || "2014"}
+          </TableCell>
+        </>
+      )}
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tab: Sales Upload
+// ---------------------------------------------------------------------------
+
+const SALES_BRANDS = ["Ecovacs", "Kuvings", "Coway", "Tineco", "Instant"];
+const SALES_TYPES = ["Accessories", "Extended Warranty"];
+
+interface SalesRow extends PreviewRowBase {
+  fiplCode: string;
+  name: string;
+  brand: string;
+  product: string;
+  saleType: string;
+  date: string;
+  quantity: number;
+  amount: number;
+}
+
+const SALES_HEADERS = [
+  "FIPL Code",
+  "Name",
+  "Brand",
+  "Product",
+  "Type",
+  "Date (DD-MM-YYYY)",
+  "Quantity",
+  "Amount (₹)",
+];
+
+function parseSalesRows(
+  rawRows: Record<string, unknown>[],
+  employeeSet: Set<string>,
+): SalesRow[] {
+  return rawRows
+    .filter((r) => SALES_HEADERS.some((h) => str(r[h]) !== ""))
+    .map((r) => {
+      const errors: string[] = [];
+      const fiplCode = str(r["FIPL Code"]);
+      const brand = str(r.Brand);
+      const saleType = str(r.Type);
+      const qtyRaw = cleanNumeric(r.Quantity);
+      const amtRaw = cleanNumeric(r["Amount (₹)"]);
+      const qty = Number(qtyRaw);
+      const amt = Number(amtRaw);
+
+      if (!fiplCode) errors.push("FIPL Code is required");
+      else if (!employeeSet.has(fiplCode.toUpperCase()))
+        errors.push("Invalid FIPL Code");
+
+      if (
+        !SALES_BRANDS.map((b) => b.toLowerCase()).includes(brand.toLowerCase())
+      ) {
+        errors.push(`Brand must be one of: ${SALES_BRANDS.join(", ")}`);
+      }
+      if (
+        !SALES_TYPES.map((t) => t.toLowerCase()).includes(
+          saleType.toLowerCase(),
+        )
+      ) {
+        errors.push(`Type must be: ${SALES_TYPES.join(" or ")}`);
+      }
+      if (qtyRaw === "" || Number.isNaN(qty) || qty < 0)
+        errors.push("Quantity must be >= 0");
+      if (amtRaw === "" || Number.isNaN(amt) || amt < 0)
+        errors.push("Amount must be >= 0");
+
+      return {
+        fiplCode,
+        name: str(r.Name),
+        brand,
+        product: str(r.Product),
+        saleType,
+        date: str(r["Date (DD-MM-YYYY)"]),
+        quantity: Number.isNaN(qty) ? 0 : qty,
+        amount: Number.isNaN(amt) ? 0 : amt,
+        errors,
+      };
+    });
+}
+
+function SalesUploadTab() {
+  const { actor, isFetching } = useActor();
+  const queryClient = useQueryClient();
+  const [parsedRows, setParsedRows] = useState<SalesRow[] | null>(null);
+  const [parseError, setParseError] = useState<string | null>(null);
+  const [fileName, setFileName] = useState<string | null>(null);
+
+  const { data: employees = [] } = useQuery({
+    queryKey: ["employees"],
+    queryFn: async () => (actor ? actor.getAllEmployees() : []),
+    enabled: !!actor && !isFetching,
+  });
+  const employeeSet = new Set(
+    employees.map((e) => e.fiplCode.trim().toUpperCase()),
+  );
+
+  const mutation = useMutation({
+    mutationFn: async (records: SalesRecord[]) => {
+      if (!actor) throw new Error("Not connected");
+      return actor.batchSalesUpload(records);
+    },
+    onSuccess: (result) => {
+      toast.success(
+        `${Number(result.successCount)} rows uploaded, ${Number(result.failCount)} failed`,
+      );
+      queryClient.invalidateQueries({ queryKey: ["sales"] });
+      setParsedRows(null);
+      setFileName(null);
+    },
+    onError: (err) => toast.error(`Upload failed: ${String(err)}`),
+  });
+
+  const handleFileSelect = async (file: File) => {
+    setParseError(null);
+    setParsedRows(null);
+    setFileName(file.name);
+    try {
+      const rawRows = await parseWorkbook(file);
+      if (rawRows.length === 0) {
+        setParseError("File is empty.");
+        return;
+      }
+      const missing = SALES_HEADERS.filter((h) => !(h in rawRows[0]));
+      if (missing.length > 0) {
+        setParseError(`Missing columns: ${missing.join(", ")}`);
+        return;
+      }
+      setParsedRows(parseSalesRows(rawRows, employeeSet));
+    } catch (e) {
+      setParseError(`Failed to parse: ${String(e)}`);
+    }
+  };
+
+  const validRows = parsedRows?.filter((r) => r.errors.length === 0) ?? [];
+
+  const brandMap: Record<string, Variant_tineco_ecovacs_coway_kuvings_instant> =
+    {
+      ecovacs: Variant_tineco_ecovacs_coway_kuvings_instant.ecovacs,
+      kuvings: Variant_tineco_ecovacs_coway_kuvings_instant.kuvings,
+      coway: Variant_tineco_ecovacs_coway_kuvings_instant.coway,
+      tineco: Variant_tineco_ecovacs_coway_kuvings_instant.tineco,
+      instant: Variant_tineco_ecovacs_coway_kuvings_instant.instant,
+    };
+
+  const typeMap: Record<string, Variant_accessories_extendedWarranty> = {
+    accessories: Variant_accessories_extendedWarranty.accessories,
+    "extended warranty": Variant_accessories_extendedWarranty.extendedWarranty,
+  };
+
+  const handleConfirm = () => {
+    const records: SalesRecord[] = validRows.map((r) => ({
+      recordId: 0n,
+      fiplCode: r.fiplCode,
+      brand: brandMap[r.brand.toLowerCase()],
+      product: r.product,
+      saleType: typeMap[r.saleType.toLowerCase()],
+      quantity: BigInt(Math.round(r.quantity)),
+      amount: r.amount,
+      saleDate: r.date,
+    }));
+    mutation.mutate(records);
+  };
+
+  return (
+    <UploadSection<SalesRow>
+      tabId="sales_upload"
+      title="Sales Upload"
+      description="Upload sales records. Brands: Ecovacs, Kuvings, Coway, Tineco, Instant. Types: Accessories, Extended Warranty."
+      icon={<TrendingUp size={17} className="text-primary" />}
+      templateFilename="sales_template.xlsx"
+      templateHeaders={SALES_HEADERS}
+      templateExample={[
+        "FIPL001",
+        "Rahul Sharma",
+        "Ecovacs",
+        "T10 Pro",
+        "Accessories",
+        "15-03-2024",
+        5,
+        25000,
+      ]}
+      parsedRows={parsedRows}
+      parseError={parseError}
+      fileName={fileName}
+      isPending={mutation.isPending}
+      onFileSelect={handleFileSelect}
+      onClear={() => {
+        setParsedRows(null);
+        setFileName(null);
+        setParseError(null);
+      }}
+      onConfirm={handleConfirm}
+      tableHeaders={[
+        "FIPL Code",
+        "Name",
+        "Brand",
+        "Product",
+        "Type",
+        "Date",
+        "Qty",
+        "Amount (₹)",
+      ]}
+      renderRow={(row) => (
+        <>
+          <TableCell className="font-mono text-xs">
+            {row.fiplCode || "—"}
+          </TableCell>
+          <TableCell className="text-sm">{row.name || "—"}</TableCell>
+          <TableCell className="text-xs">{row.brand || "—"}</TableCell>
+          <TableCell className="text-xs">{row.product || "—"}</TableCell>
+          <TableCell className="text-xs">{row.saleType || "—"}</TableCell>
+          <TableCell className="text-xs">{row.date || "—"}</TableCell>
+          <TableCell className="text-xs text-right">{row.quantity}</TableCell>
+          <TableCell className="text-xs text-right">
+            ₹{row.amount.toLocaleString("en-IN")}
+          </TableCell>
+        </>
+      )}
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tab: Calling Records Upload
+// ---------------------------------------------------------------------------
+
+interface CallingRow extends PreviewRowBase {
+  fiplCode: string;
+  fseName: string;
+  customerName: string;
+  contact: string;
+  brand: string;
+  product: string;
+  cesScore: number;
+  remark: string;
+  callDate: string;
+  agent: string;
+}
+
+const CALLING_HEADERS = [
+  "FIPL Code",
+  "FSE Name",
+  "Customer Name",
+  "Customer Contact",
+  "Brand",
+  "Product",
+  "CES Score",
+  "Remark",
+  "Date of Call (DD-MM-YYYY)",
+  "Agent",
+];
+
+function parseCallingRows(
+  rawRows: Record<string, unknown>[],
+  employeeSet: Set<string>,
+): CallingRow[] {
+  return rawRows
+    .filter((r) => CALLING_HEADERS.some((h) => str(r[h]) !== ""))
+    .map((r) => {
+      const errors: string[] = [];
+      const fiplCode = str(r["FIPL Code"]);
+      const brand = str(r.Brand);
+      const cesRaw = cleanNumeric(r["CES Score"]);
+      const ces = Number(cesRaw);
+
+      if (!fiplCode) errors.push("FIPL Code is required");
+      else if (!employeeSet.has(fiplCode.toUpperCase()))
+        errors.push("Invalid FIPL Code");
+
+      if (
+        brand &&
+        !SALES_BRANDS.map((b) => b.toLowerCase()).includes(brand.toLowerCase())
+      ) {
+        errors.push(`Brand must be one of: ${SALES_BRANDS.join(", ")}`);
+      }
+      if (cesRaw !== "" && (Number.isNaN(ces) || ces < 0)) {
+        errors.push("CES Score must be >= 0");
+      }
+
+      return {
+        fiplCode,
+        fseName: str(r["FSE Name"]),
+        customerName: str(r["Customer Name"]),
+        contact: str(r["Customer Contact"]),
+        brand,
+        product: str(r.Product),
+        cesScore: Number.isNaN(ces) ? 0 : ces,
+        remark: str(r.Remark),
+        callDate: str(r["Date of Call (DD-MM-YYYY)"]),
+        agent: str(r.Agent),
+        errors,
+      };
+    });
+}
+
+function CallingRecordsUploadTab() {
+  const { actor, isFetching } = useActor();
+  const queryClient = useQueryClient();
+  const [parsedRows, setParsedRows] = useState<CallingRow[] | null>(null);
+  const [parseError, setParseError] = useState<string | null>(null);
+  const [fileName, setFileName] = useState<string | null>(null);
+
+  const { data: employees = [] } = useQuery({
+    queryKey: ["employees"],
+    queryFn: async () => (actor ? actor.getAllEmployees() : []),
+    enabled: !!actor && !isFetching,
+  });
+  const employeeSet = new Set(
+    employees.map((e) => e.fiplCode.trim().toUpperCase()),
+  );
+
+  const mutation = useMutation({
+    mutationFn: async (records: FeedbackEntry[]) => {
+      if (!actor) throw new Error("Not connected");
+      return actor.batchFeedbackUpload(records);
+    },
+    onSuccess: (result) => {
+      toast.success(
+        `${Number(result.successCount)} rows uploaded, ${Number(result.failCount)} failed`,
+      );
+      queryClient.invalidateQueries({ queryKey: ["feedback"] });
+      setParsedRows(null);
+      setFileName(null);
+    },
+    onError: (err) => toast.error(`Upload failed: ${String(err)}`),
+  });
+
+  const brandMap: Record<string, Variant_tineco_ecovacs_coway_kuvings_instant> =
+    {
+      ecovacs: Variant_tineco_ecovacs_coway_kuvings_instant.ecovacs,
+      kuvings: Variant_tineco_ecovacs_coway_kuvings_instant.kuvings,
+      coway: Variant_tineco_ecovacs_coway_kuvings_instant.coway,
+      tineco: Variant_tineco_ecovacs_coway_kuvings_instant.tineco,
+      instant: Variant_tineco_ecovacs_coway_kuvings_instant.instant,
+    };
+
+  const handleFileSelect = async (file: File) => {
+    setParseError(null);
+    setParsedRows(null);
+    setFileName(file.name);
+    try {
+      const rawRows = await parseWorkbook(file);
+      if (rawRows.length === 0) {
+        setParseError("File is empty.");
+        return;
+      }
+      const missing = CALLING_HEADERS.filter((h) => !(h in rawRows[0]));
+      if (missing.length > 0) {
+        setParseError(`Missing columns: ${missing.join(", ")}`);
+        return;
+      }
+      setParsedRows(parseCallingRows(rawRows, employeeSet));
+    } catch (e) {
+      setParseError(`Failed to parse: ${String(e)}`);
+    }
+  };
+
+  const validRows = parsedRows?.filter((r) => r.errors.length === 0) ?? [];
+
+  const handleConfirm = () => {
+    const records: FeedbackEntry[] = validRows.map((r) => ({
+      entryId: 0n,
+      fiplCode: r.fiplCode,
+      customerName: r.customerName,
+      contact: r.contact,
+      brand:
+        brandMap[r.brand.toLowerCase()] ??
+        Variant_tineco_ecovacs_coway_kuvings_instant.ecovacs,
+      product: r.product,
+      cesScore: r.cesScore,
+      remark: r.remark,
+      callDate: r.callDate,
+      agent: r.agent,
+    }));
+    mutation.mutate(records);
+  };
+
+  return (
+    <UploadSection<CallingRow>
+      tabId="calling_upload"
+      title="Calling Records Upload"
+      description="Upload customer calling records and feedback. CES Score = customer satisfaction rating."
+      icon={<Phone size={17} className="text-primary" />}
+      templateFilename="calling_records_template.xlsx"
+      templateHeaders={CALLING_HEADERS}
+      templateExample={[
+        "FIPL001",
+        "Rahul Sharma",
+        "Amit Kumar",
+        "9876543210",
+        "Ecovacs",
+        "T10 Pro",
+        90,
+        "Customer satisfied",
+        "15-03-2024",
+        "Rahul Sharma",
+      ]}
+      parsedRows={parsedRows}
+      parseError={parseError}
+      fileName={fileName}
+      isPending={mutation.isPending}
+      onFileSelect={handleFileSelect}
+      onClear={() => {
+        setParsedRows(null);
+        setFileName(null);
+        setParseError(null);
+      }}
+      onConfirm={handleConfirm}
+      tableHeaders={[
+        "FIPL Code",
+        "FSE Name",
+        "Customer",
+        "Contact",
+        "Brand",
+        "Product",
+        "CES",
+        "Remark",
+        "Call Date",
+        "Agent",
+      ]}
+      renderRow={(row) => (
+        <>
+          <TableCell className="font-mono text-xs">
+            {row.fiplCode || "—"}
+          </TableCell>
+          <TableCell className="text-xs">{row.fseName || "—"}</TableCell>
+          <TableCell className="text-xs">{row.customerName || "—"}</TableCell>
+          <TableCell className="text-xs">{row.contact || "—"}</TableCell>
+          <TableCell className="text-xs">{row.brand || "—"}</TableCell>
+          <TableCell className="text-xs">{row.product || "—"}</TableCell>
+          <TableCell className="text-xs text-right">{row.cesScore}</TableCell>
+          <TableCell className="text-xs max-w-[120px] truncate">
+            {row.remark || "—"}
+          </TableCell>
+          <TableCell className="text-xs">{row.callDate || "—"}</TableCell>
+          <TableCell className="text-xs">{row.agent || "—"}</TableCell>
+        </>
+      )}
+    />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tab: Top Performers (preserved)
+// ---------------------------------------------------------------------------
+
+const TOP_PERFORMERS_HEADERS = [
+  "Rank",
+  "Name",
+  "FIPL Code",
+  "Accessories Units",
+  "Extended Warranty Units",
+  "Total Sales Amount",
+];
+
+interface TopPerformerRow extends PreviewRowBase {
+  rank: number;
+  name: string;
+  fiplCode: string;
+  accessories: number;
+  extendedWarranty: number;
+  totalSales: number;
+}
+
+function getRankBadge(rank: number) {
+  if (rank === 1)
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold bg-amber-100 text-amber-700 border border-amber-300">
+        🥇 1
+      </span>
+    );
+  if (rank === 2)
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold bg-slate-100 text-slate-600 border border-slate-300">
+        🥈 2
+      </span>
+    );
+  if (rank === 3)
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold bg-orange-100 text-orange-700 border border-orange-300">
+        🥉 3
+      </span>
+    );
+  return (
+    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-muted text-muted-foreground">
+      {rank}
+    </span>
+  );
+}
+
+function parseTopPerformerRows(
+  rawRows: Record<string, unknown>[],
+  employeeSet: Set<string>,
+): TopPerformerRow[] {
+  const seenRanks = new Map<number, number>();
+  const parsed: TopPerformerRow[] = rawRows
+    .filter((r) => TOP_PERFORMERS_HEADERS.some((h) => str(r[h]) !== ""))
+    .map((r) => {
+      const errors: string[] = [];
+      const rankRaw = str(r.Rank);
+      const fiplCode = str(r["FIPL Code"]);
+      const rank = Number(rankRaw);
+
+      if (!rankRaw || !Number.isInteger(rank) || rank < 1 || rank > 10)
+        errors.push("Rank must be 1–10");
+      if (!str(r.Name)) errors.push("Name is required");
+      if (!fiplCode) errors.push("FIPL Code is required");
+      else if (!employeeSet.has(fiplCode.toUpperCase()))
+        errors.push("Invalid FIPL Code");
+
+      const parseN = (key: string, label: string) => {
+        const raw = cleanNumeric(r[key]);
+        const n = Number(raw);
+        if (raw === "" || Number.isNaN(n) || n < 0) {
+          errors.push(`Invalid number (${label})`);
+          return 0;
+        }
+        return n;
+      };
+
+      return {
+        rank: Number.isInteger(rank) ? rank : 0,
+        name: str(r.Name),
+        fiplCode,
+        accessories: parseN("Accessories Units", "Accessories Units"),
+        extendedWarranty: parseN(
+          "Extended Warranty Units",
+          "Extended Warranty Units",
+        ),
+        totalSales: parseN("Total Sales Amount", "Total Sales Amount"),
+        errors,
+      };
+    });
+
+  parsed.forEach((row, idx) => {
+    if (row.rank >= 1 && row.rank <= 10) {
+      if (seenRanks.has(row.rank)) {
+        row.errors.push("Duplicate rank");
+        const firstIdx = seenRanks.get(row.rank)!;
+        if (!parsed[firstIdx].errors.includes("Duplicate rank")) {
+          parsed[firstIdx].errors.push("Duplicate rank");
+        }
+      } else {
+        seenRanks.set(row.rank, idx);
+      }
+    }
+  });
+  return parsed;
+}
+
+function TopPerformersTab() {
+  const { actor, isFetching } = useActor();
+  const queryClient = useQueryClient();
+  const [parsedRows, setParsedRows] = useState<TopPerformerRow[] | null>(null);
+  const [parseError, setParseError] = useState<string | null>(null);
+  const [fileName, setFileName] = useState<string | null>(null);
+
+  const { data: topPerformers = [], isLoading } = useQuery<TopPerformer[]>({
+    queryKey: ["topPerformers"],
+    queryFn: async () => (actor ? actor.getTopPerformers() : []),
+    enabled: !!actor && !isFetching,
+  });
+
+  const { data: employees = [] } = useQuery({
+    queryKey: ["employees"],
+    queryFn: async () => (actor ? actor.getAllEmployees() : []),
+    enabled: !!actor && !isFetching,
+  });
+  const employeeSet = new Set(
+    employees.map((e) => e.fiplCode.trim().toUpperCase()),
+  );
+  const employeeMap = new Map(
+    employees.map((e) => [e.fiplCode.trim().toUpperCase(), e]),
+  );
+
+  const mutation = useMutation({
+    mutationFn: async (records: TopPerformer[]) => {
+      if (!actor) throw new Error("Not connected");
+      return actor.batchTopPerformersUpload(records);
+    },
+    onSuccess: (result) => {
+      toast.success(
+        `${Number(result.successCount)} rows uploaded, ${Number(result.failCount)} failed`,
+      );
+      queryClient.invalidateQueries({ queryKey: ["topPerformers"] });
+      setParsedRows(null);
+      setFileName(null);
+    },
+    onError: (err) => toast.error(`Upload failed: ${String(err)}`),
+  });
+
+  const handleFileSelect = async (file: File) => {
+    setParseError(null);
+    setParsedRows(null);
+    setFileName(file.name);
+    try {
+      const rawRows = await parseWorkbook(file);
+      if (rawRows.length === 0) {
+        setParseError("File is empty.");
+        return;
+      }
+      const missing = TOP_PERFORMERS_HEADERS.filter((h) => !(h in rawRows[0]));
+      if (missing.length > 0) {
+        setParseError(`Missing columns: ${missing.join(", ")}`);
+        return;
+      }
+      setParsedRows(parseTopPerformerRows(rawRows, employeeSet));
+    } catch (e) {
+      setParseError(`Failed to parse: ${String(e)}`);
+    }
+  };
+
+  const validRows = parsedRows?.filter((r) => r.errors.length === 0) ?? [];
+
+  const handleConfirm = () => {
+    const records: TopPerformer[] = validRows.map((r) => ({
+      rank: BigInt(r.rank),
+      name: r.name,
+      fiplCode: r.fiplCode,
+      accessories: BigInt(r.accessories),
+      extendedWarranty: BigInt(r.extendedWarranty),
+      totalSales: r.totalSales,
+    }));
+    mutation.mutate(records);
+  };
+
+  const sortedPerformers = [...topPerformers]
+    .sort((a, b) => b.totalSales - a.totalSales)
+    .slice(0, 10);
+
+  return (
+    <div className="space-y-4">
+      <UploadSection<TopPerformerRow>
+        tabId="top_performers"
+        title="Top Performers Upload"
+        description="Upload top 10 performer rankings. Ranks must be 1–10 with no duplicates."
+        icon={<Trophy size={17} className="text-amber-500" />}
+        templateFilename="top_performers_template.xlsx"
+        templateHeaders={TOP_PERFORMERS_HEADERS}
+        templateExample={[1, "Rahul Sharma", "FIPL001", 25, 10, 250000]}
+        parsedRows={parsedRows}
+        parseError={parseError}
+        fileName={fileName}
+        isPending={mutation.isPending}
+        onFileSelect={handleFileSelect}
+        onClear={() => {
+          setParsedRows(null);
+          setFileName(null);
+          setParseError(null);
+        }}
+        onConfirm={handleConfirm}
+        tableHeaders={[
+          "Rank",
+          "Name",
+          "FIPL Code",
+          "Accessories",
+          "Ext. Warranty",
+          "Total Sales (₹)",
+        ]}
+        renderRow={(row) => (
+          <>
+            <TableCell>{getRankBadge(row.rank)}</TableCell>
+            <TableCell className="text-sm">{row.name || "—"}</TableCell>
+            <TableCell className="font-mono text-xs">
+              {row.fiplCode || "—"}
+            </TableCell>
+            <TableCell className="text-xs text-right">
+              {row.accessories}
+            </TableCell>
+            <TableCell className="text-xs text-right">
+              {row.extendedWarranty}
+            </TableCell>
+            <TableCell className="text-xs text-right">
+              ₹{row.totalSales.toLocaleString("en-IN")}
+            </TableCell>
+          </>
+        )}
+      />
+
+      {/* Current Top Performers Table */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base font-semibold flex items-center gap-2">
+            <Trophy size={16} className="text-amber-500" />
+            Current Top 10 Performers
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {isLoading ? (
+            <div
+              className="flex items-center justify-center py-12 gap-2 text-muted-foreground"
+              data-ocid="top_performers.loading_state"
+            >
+              <Loader2 size={16} className="animate-spin" />
+              <span className="text-sm">Loading...</span>
+            </div>
+          ) : sortedPerformers.length === 0 ? (
+            <div
+              className="flex flex-col items-center justify-center py-12 text-center text-muted-foreground gap-3"
+              data-ocid="top_performers.empty_state"
+            >
+              <FileSpreadsheet size={36} className="opacity-30" />
+              <p className="text-sm font-medium">No data available</p>
+              <p className="text-xs">Upload a file to populate this table.</p>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-border overflow-hidden">
+              <Table>
+                <TableHeader>
+                  <TableRow className="bg-muted/50">
+                    <TableHead className="w-16 text-xs">Rank</TableHead>
+                    <TableHead className="text-xs">Name</TableHead>
+                    <TableHead className="text-xs">FIPL Code</TableHead>
+                    <TableHead className="text-xs text-right">
+                      Accessories
+                    </TableHead>
+                    <TableHead className="text-xs text-right">
+                      Ext. Warranty
+                    </TableHead>
+                    <TableHead className="text-xs text-right">
+                      Total Sales (₹)
+                    </TableHead>
+                    <TableHead className="text-xs">Region</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {sortedPerformers.map((p, idx) => {
+                    const rank = Number(p.rank);
+                    const emp = employeeMap.get(
+                      p.fiplCode.trim().toUpperCase(),
+                    );
+                    const rowClass =
+                      rank === 1
+                        ? "bg-amber-50 border-l-4 border-l-amber-400"
+                        : rank === 2
+                          ? "bg-slate-50 border-l-4 border-l-slate-400"
+                          : rank === 3
+                            ? "bg-orange-50 border-l-4 border-l-orange-400"
+                            : "";
+                    return (
+                      <TableRow
+                        key={p.fiplCode}
+                        data-ocid={`top_performers.item.${idx + 1}`}
+                        className={rowClass}
+                      >
+                        <TableCell>{getRankBadge(rank)}</TableCell>
+                        <TableCell className="font-medium text-sm">
+                          {p.name}
+                        </TableCell>
+                        <TableCell className="font-mono text-xs text-muted-foreground">
+                          {p.fiplCode}
+                        </TableCell>
+                        <TableCell className="text-sm text-right">
+                          {Number(p.accessories).toLocaleString("en-IN")}
+                        </TableCell>
+                        <TableCell className="text-sm text-right">
+                          {Number(p.extendedWarranty).toLocaleString("en-IN")}
+                        </TableCell>
+                        <TableCell className="text-sm text-right font-semibold">
+                          ₹{p.totalSales.toLocaleString("en-IN")}
+                        </TableCell>
+                        <TableCell className="text-sm">
+                          {emp?.region ?? (
+                            <span className="text-muted-foreground text-xs">
+                              N/A
+                            </span>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main Uploads Page
+// ---------------------------------------------------------------------------
+
+const TABS = [
+  { id: "employees", label: "Employees", icon: Users },
+  { id: "parameters", label: "Parameters", icon: BarChart2 },
+  { id: "attendance", label: "Attendance", icon: CalendarDays },
+  { id: "swot", label: "SWOT", icon: ClipboardList },
+  { id: "sales", label: "Sales", icon: TrendingUp },
+  { id: "calling", label: "Calling Records", icon: Phone },
+  { id: "top_performers", label: "Top Performers", icon: Trophy },
+];
+
+export default function Uploads() {
+  return (
+    <div className="space-y-5">
+      {/* Page Header */}
+      <div className="flex items-center gap-3">
+        <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
+          <Upload size={20} className="text-primary" />
+        </div>
+        <div>
+          <h1 className="text-xl font-bold text-foreground">Data Upload</h1>
+          <p className="text-sm text-muted-foreground">
+            Download templates, fill in data, and upload to populate dashboards
+          </p>
+        </div>
+      </div>
+
+      {/* Info Banner */}
+      <div className="flex items-start gap-3 p-3.5 bg-primary/5 border border-primary/15 rounded-xl">
+        <FileSpreadsheet
+          size={17}
+          className="text-primary mt-0.5 flex-shrink-0"
+        />
+        <p className="text-sm text-foreground/80">
+          <span className="font-semibold text-foreground">How it works:</span>{" "}
+          Click &quot;Download Template&quot; on any section, fill in your data
+          following the example row, save as .xlsx or .csv, then upload and
+          confirm to save to the dashboard.
+        </p>
+      </div>
+
+      {/* Tabs */}
+      <Tabs defaultValue="employees" className="w-full">
+        <TabsList
+          className="flex flex-wrap h-auto gap-1 bg-muted/50 p-1 rounded-xl mb-2"
+          data-ocid="uploads.tab"
+        >
+          {TABS.map(({ id, label, icon: Icon }) => (
+            <TabsTrigger
+              key={id}
+              value={id}
+              className="flex items-center gap-1.5 text-xs px-3 py-2 rounded-lg data-[state=active]:bg-background data-[state=active]:shadow-sm"
+              data-ocid={`uploads.${id}.tab`}
+            >
+              <Icon size={13} />
+              {label}
+            </TabsTrigger>
+          ))}
+        </TabsList>
+
+        <TabsContent value="employees" className="mt-4">
+          <EmployeeUploadTab />
+        </TabsContent>
+        <TabsContent value="parameters" className="mt-4">
+          <ParametersUploadTab />
+        </TabsContent>
+        <TabsContent value="attendance" className="mt-4">
+          <AttendanceUploadTab />
+        </TabsContent>
+        <TabsContent value="swot" className="mt-4">
+          <SWOTUploadTab />
+        </TabsContent>
+        <TabsContent value="sales" className="mt-4">
+          <SalesUploadTab />
+        </TabsContent>
+        <TabsContent value="calling" className="mt-4">
+          <CallingRecordsUploadTab />
+        </TabsContent>
+        <TabsContent value="top_performers" className="mt-4">
+          <TopPerformersTab />
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}

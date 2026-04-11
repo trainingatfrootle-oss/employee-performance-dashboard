@@ -1,0 +1,199 @@
+type TopPerformer = 
+ record {
+   accessories: nat;
+   extendedWarranty: nat;
+   fiplCode: text;
+   name: text;
+   rank: nat;
+   totalSales: float64;
+ };
+type SalesRecord = 
+ record {
+   amount: float64;
+   brand: variant {
+            coway;
+            ecovacs;
+            instant;
+            kuvings;
+            tineco;
+          };
+   fiplCode: text;
+   product: text;
+   quantity: nat;
+   recordId: nat;
+   saleDate: text;
+   saleType: variant {
+               accessories;
+               extendedWarranty;
+             };
+ };
+type SWOT = 
+ record {
+   cesScore: float64;
+   feedbacks: vec text;
+   fiplCode: text;
+   opportunities: vec text;
+   problems: vec text;
+   strengths: vec text;
+   threats: vec text;
+   traits: vec text;
+   weaknesses: vec text;
+ };
+type Performance = 
+ record {
+   complaintVisits: nat;
+   demoVisits: nat;
+   fiplCode: text;
+   operationalDiscipline: float64;
+   productKnowledgeScore: float64;
+   reviewCount: nat;
+   salesInfluenceIndex: float64;
+   softSkillsScore: float64;
+   videoCallDemos: nat;
+ };
+type Order = 
+ variant {
+   equal;
+   greater;
+   less;
+ };
+type FeedbackEntry = 
+ record {
+   agent: text;
+   brand: variant {
+            coway;
+            ecovacs;
+            instant;
+            kuvings;
+            tineco;
+          };
+   callDate: text;
+   cesScore: float64;
+   contact: text;
+   customerName: text;
+   entryId: nat;
+   fiplCode: text;
+   product: text;
+   remark: text;
+ };
+type Employee = 
+ record {
+   avatarUrl: text;
+   department: text;
+   familyDetails: text;
+   fiplCode: text;
+   fseCategory: text;
+   joinDate: text;
+   name: text;
+   pastExperience: text;
+   region: text;
+   role: text;
+   status: variant {
+             active;
+             onHold;
+           };
+ };
+type DashboardStats = 
+ record {
+   activeCount: nat;
+   averageCesScore: float64;
+   totalEmployees: nat;
+   totalSalesAmount: float64;
+ };
+type BatchResult = 
+ record {
+   errors: vec text;
+   failCount: nat;
+   successCount: nat;
+ };
+type Attendance = 
+ record {
+   date: text;
+   daysOff: nat;
+   fiplCode: text;
+   labType: variant {
+              attendance;
+              daysBrief;
+              eod;
+            };
+   reason: text;
+   recordId: nat;
+ };
+service : {
+  addAttendance: ("record": Attendance) -> (variant {
+                                              err: text;
+                                              ok;
+                                            });
+  addEmployee: (employee: Employee) -> (variant {
+                                          err: text;
+                                          ok;
+                                        });
+  addFeedback: (entry: FeedbackEntry) -> (variant {
+                                            err: text;
+                                            ok;
+                                          });
+  addSalesRecord: ("record": SalesRecord) -> (variant {
+                                                err: text;
+                                                ok;
+                                              });
+  batchAttendanceUpload: (records: vec Attendance) -> (BatchResult);
+  batchEmployeeUpload: (records: vec Employee) -> (BatchResult);
+  batchFeedbackUpload: (records: vec FeedbackEntry) -> (BatchResult);
+  batchParametersUpload: (records: vec Performance) -> (BatchResult);
+  batchSWOTUpload: (records: vec SWOT) -> (BatchResult);
+  batchSalesUpload: (records: vec SalesRecord) -> (BatchResult);
+  batchTopPerformersUpload: (records: vec TopPerformer) -> (BatchResult);
+  /// Clear the entire key-value store.
+  clearAllKV: () -> ();
+  compareTopPerformersBySales: (a: TopPerformer, b: TopPerformer) ->
+   (Order) query;
+  /// Delete only attendance records
+  deleteAllAttendance: () -> () oneway;
+  /// Delete all data (employees, sales, attendance, SWOT, performance, feedback, top performers)
+  deleteAllData: () -> ();
+  /// DELETE OPERATIONS
+  /// Delete all employees and all related data.
+  deleteAllEmployees: () -> () oneway;
+  /// Delete only feedback/calling records
+  deleteAllFeedback: () -> () oneway;
+  /// Delete only performance/parameters records
+  deleteAllPerformances: () -> () oneway;
+  /// Delete only SWOT records
+  deleteAllSWOT: () -> () oneway;
+  /// Delete only sales records
+  deleteAllSales: () -> () oneway;
+  /// Delete only top performer records
+  deleteAllTopPerformers: () -> () oneway;
+  deleteEmployee: (fiplCode: text) -> ();
+  /// Delete a key from the store.
+  deleteKV: (key: text) -> ();
+  getActiveEmployees: () -> (vec Employee) query;
+  getAllEmployees: () -> (vec Employee) query;
+  /// Get all key-value pairs as an array of (key, value) tuples.
+  getAllKV: () -> (vec record {
+                         text;
+                         text;
+                       }) query;
+  getAllPerformancesSortedBySII: () -> (vec Performance) query;
+  getAttendanceByFIPL: (fiplCode: text) -> (vec Attendance) query;
+  getDashboardStats: () -> (DashboardStats) query;
+  getEmployee: (fiplCode: text) -> (opt Employee) query;
+  getFeedbackByFIPL: (fiplCode: text) -> (vec FeedbackEntry) query;
+  /// Get a value by key. Returns null if not found.
+  getKV: (key: text) -> (opt text) query;
+  getPerformanceByFIPL: (fiplCode: text) -> (opt Performance) query;
+  getSWOTByFIPL: (fiplCode: text) -> (opt SWOT) query;
+  getSalesByFIPL: (fiplCode: text) -> (vec SalesRecord) query;
+  getTopPerformers: () -> (vec TopPerformer) query;
+  /// Set a key-value pair in the store.
+  setKV: (key: text, value: text) -> ();
+  updateEmployee: (employee: Employee) -> ();
+  upsertPerformance: (performance: Performance) -> (variant {
+                                                      err: text;
+                                                      ok;
+                                                    });
+  upsertSWOT: (swot: SWOT) -> (variant {
+                                 err: text;
+                                 ok;
+                               });
+}

@@ -1,0 +1,92 @@
+@import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --radius: 0.5rem;
+    --background: 0.965 0.008 240;
+    --card: 1 0 0;
+    --card-foreground: 0.18 0.02 255;
+    --popover: 1 0 0;
+    --popover-foreground: 0.18 0.02 255;
+    --primary: 0.54 0.21 256;
+    --primary-foreground: 1 0 0;
+    --secondary: 0.945 0.012 240;
+    --secondary-foreground: 0.28 0.04 255;
+    --muted: 0.945 0.012 240;
+    --muted-foreground: 0.51 0.012 260;
+    --accent: 0.93 0.015 240;
+    --accent-foreground: 0.28 0.04 255;
+    --destructive: 0.577 0.245 27.325;
+    --destructive-foreground: 1 0 0;
+    --border: 0.928 0.013 240;
+    --input: 0.928 0.013 240;
+    --ring: 0.54 0.21 256;
+    --foreground: 0.18 0.02 255;
+    --chart-1: 0.54 0.21 256;
+    --chart-2: 0.79 0.085 240;
+    --chart-3: 0.69 0.045 240;
+    --chart-4: 0.7 0.18 145;
+    --chart-5: 0.65 0.22 27;
+    --sidebar: 0.19 0.065 255;
+    --sidebar-foreground: 0.855 0.025 240;
+    --sidebar-primary: 0.54 0.21 256;
+    --sidebar-primary-foreground: 1 0 0;
+    --sidebar-accent: 0.26 0.07 255;
+    --sidebar-accent-foreground: 0.855 0.025 240;
+    --sidebar-border: 0.28 0.05 255;
+    --sidebar-ring: 0.54 0.21 256;
+  }
+
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-family: "Plus Jakarta Sans", system-ui, sans-serif;
+  }
+}
+
+.sidebar-gradient {
+  background: linear-gradient(160deg, #0b1f3b 0%, #123a6b 100%);
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: oklch(var(--border));
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: oklch(var(--muted-foreground));
+}
+
+@keyframes shake {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-8px);
+  }
+  40% {
+    transform: translateX(8px);
+  }
+  60% {
+    transform: translateX(-6px);
+  }
+  80% {
+    transform: translateX(6px);
+  }
+}
+.animate-shake {
+  animation: shake 0.4s ease-in-out;
+}

@@ -1,0 +1,154 @@
+// Version: 1.0.0
+type Attendance__674725553 =
+  {
+    date : Text;
+    daysOff : Nat;
+    fiplCode : Text;
+    labType : {#attendance; #daysBrief; #eod};
+    reason : Text;
+    recordId : Nat
+  };
+type Data__791452850<K, V> =
+  {var count : Nat__490723111; kvs : [var ?(K, V)]};
+type Employee__476045079 =
+  {
+    avatarUrl : Text;
+    department : Text;
+    familyDetails : Text;
+    fiplCode : Text;
+    fseCategory : Text;
+    joinDate : Text;
+    name : Text;
+    pastExperience : Text;
+    region : Text;
+    role : Text;
+    status : {#active; #onHold}
+  };
+type FeedbackEntry__271733681 =
+  {
+    agent : Text;
+    brand : {#coway; #ecovacs; #instant; #kuvings; #tineco};
+    callDate : Text;
+    cesScore : Float;
+    contact : Text;
+    customerName : Text;
+    entryId : Nat;
+    fiplCode : Text;
+    product : Text;
+    remark : Text
+  };
+type Internal__8484328<K, V> =
+  {children : [var ?Node__46230540<K, V>]; data : Data__791452850<K, V>};
+type Leaf__809889148<K, V> = {data : Data__791452850<K, V>};
+type List__415060402<T> = List__790383201<T>;
+type List__790383201<T> =
+  {
+    var blockIndex : Nat__490723111;
+    var blocks : [var [var ?T]];
+    var elementIndex : Nat__490723111
+  };
+type Nat__490723111 = Nat__920180692;
+type Nat__920180692 = Nat;
+type Node__46230540<K, V> =
+  {#internal : Internal__8484328<K, V>; #leaf : Leaf__809889148<K, V>};
+type Performance__609301870 =
+  {
+    complaintVisits : Nat;
+    demoVisits : Nat;
+    fiplCode : Text;
+    operationalDiscipline : Float;
+    productKnowledgeScore : Float;
+    reviewCount : Nat;
+    salesInfluenceIndex : Float;
+    softSkillsScore : Float;
+    videoCallDemos : Nat
+  };
+type SWOT__631817290 =
+  {
+    cesScore : Float;
+    feedbacks : [Text];
+    fiplCode : Text;
+    opportunities : [Text];
+    problems : [Text];
+    strengths : [Text];
+    threats : [Text];
+    traits : [Text];
+    weaknesses : [Text]
+  };
+type SalesRecord__455225834 =
+  {
+    amount : Float;
+    brand : {#coway; #ecovacs; #instant; #kuvings; #tineco};
+    fiplCode : Text;
+    product : Text;
+    quantity : Nat;
+    recordId : Nat;
+    saleDate : Text;
+    saleType : {#accessories; #extendedWarranty}
+  };
+type TopPerformer__792444130 =
+  {
+    accessories : Nat;
+    extendedWarranty : Nat;
+    fiplCode : Text;
+    name : Text;
+    rank : Nat;
+    totalSales : Float
+  };
+actor {
+  stable attendanceByFIPL :
+    {
+      var root : Node__46230540<Text, List__415060402<Nat>>;
+      var size : Nat__490723111
+    };
+  stable attendanceRecords :
+    {
+      var root : Node__46230540<Nat, Attendance__674725553>;
+      var size : Nat__490723111
+    };
+  stable employees :
+    {
+      var root : Node__46230540<Text, Employee__476045079>;
+      var size : Nat__490723111
+    };
+  stable feedbackByFIPL :
+    {
+      var root : Node__46230540<Text, List__415060402<Nat>>;
+      var size : Nat__490723111
+    };
+  stable feedbackEntries :
+    {
+      var root : Node__46230540<Nat, FeedbackEntry__271733681>;
+      var size : Nat__490723111
+    };
+  stable kvStore :
+    {var root : Node__46230540<Text, Text>; var size : Nat__490723111};
+  stable var nextAttendanceId : Nat;
+  stable var nextFeedbackId : Nat;
+  stable var nextSalesId : Nat;
+  stable performances :
+    {
+      var root : Node__46230540<Text, Performance__609301870>;
+      var size : Nat__490723111
+    };
+  stable salesByFIPL :
+    {
+      var root : Node__46230540<Text, List__415060402<Nat>>;
+      var size : Nat__490723111
+    };
+  stable salesRecords :
+    {
+      var root : Node__46230540<Nat, SalesRecord__455225834>;
+      var size : Nat__490723111
+    };
+  stable swots :
+    {
+      var root : Node__46230540<Text, SWOT__631817290>;
+      var size : Nat__490723111
+    };
+  stable topPerformers :
+    {
+      var root : Node__46230540<Nat, TopPerformer__792444130>;
+      var size : Nat__490723111
+    }
+};
