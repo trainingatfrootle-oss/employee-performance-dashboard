@@ -686,8 +686,8 @@ export default function Feedback({
         r.brand.toLowerCase() === brandFilter.toLowerCase();
       const matchCes =
         cesFilter === "all" ||
-        (cesFilter === "positive" && r.cesScore > 30) ||
-        (cesFilter === "negative" && r.cesScore <= 30);
+        (cesFilter === "positive" && r.cesScore >= 30) ||
+        (cesFilter === "negative" && r.cesScore < 30);
       const matchRegion = regionFilter === "all" || r.region === regionFilter;
       const matchIssueType =
         issueTypeFilter === "all" || r.typeOfIssue === issueTypeFilter;
