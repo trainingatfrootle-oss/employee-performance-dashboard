@@ -280,34 +280,31 @@ function UploadSection<T extends PreviewRowBase>({
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {
-                      // biome-ignore lint/suspicious/noArrayIndexKey: no stable id
-                      parsedRows.map((row, idx) => (
-                        <TableRow
-                          // biome-ignore lint/suspicious/noArrayIndexKey: parsed rows have no stable id
-                          key={`row-${idx}`}
-                          data-ocid={`${tabId}.item.${idx + 1}`}
-                          className={row.errors.length > 0 ? "bg-red-50" : ""}
-                        >
-                          {renderRow(row, idx)}
-                          <TableCell className="text-xs">
-                            {row.errors.length > 0 ? (
-                              <span className="text-destructive flex items-start gap-1">
-                                <AlertCircle
-                                  size={11}
-                                  className="mt-0.5 flex-shrink-0"
-                                />
-                                {row.errors.join("; ")}
-                              </span>
-                            ) : (
-                              <span className="text-green-600 flex items-center gap-1">
-                                <CheckCircle2 size={11} /> Valid
-                              </span>
-                            )}
-                          </TableCell>
-                        </TableRow>
-                      ))
-                    }
+                    {parsedRows.map((row, idx) => (
+                      <TableRow
+                        // biome-ignore lint/suspicious/noArrayIndexKey: parsed rows have no stable id
+                        key={`row-${idx}`}
+                        data-ocid={`${tabId}.item.${idx + 1}`}
+                        className={row.errors.length > 0 ? "bg-red-50" : ""}
+                      >
+                        {renderRow(row, idx)}
+                        <TableCell className="text-xs">
+                          {row.errors.length > 0 ? (
+                            <span className="text-destructive flex items-start gap-1">
+                              <AlertCircle
+                                size={11}
+                                className="mt-0.5 flex-shrink-0"
+                              />
+                              {row.errors.join("; ")}
+                            </span>
+                          ) : (
+                            <span className="text-green-600 flex items-center gap-1">
+                              <CheckCircle2 size={11} /> Valid
+                            </span>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
                   </TableBody>
                 </Table>
               </ScrollArea>

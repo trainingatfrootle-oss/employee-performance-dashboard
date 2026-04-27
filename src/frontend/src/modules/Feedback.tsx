@@ -19,9 +19,10 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { XLSX } from "@/lib/xlsxShim";
 import {
+  ArrowLeft,
   ChevronDown,
   ChevronUp,
-  Grid2X2,
+  Download,
   Loader2,
   Plus,
   Search,
@@ -29,6 +30,20 @@ import {
   Upload,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Line,
+  LineChart,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { toast } from "sonner";
 import { PasswordGate, usePasswordGate } from "../components/PasswordGate";
 import { useLabels } from "../contexts/UILabelsContext";
@@ -42,6 +57,7 @@ import {
   useBatchFeedbackUpload,
 } from "../hooks/useQueries";
 import type { FeedbackEntry } from "../hooks/useQueries";
+import { buildFilename, exportToExcel } from "../lib/exportUtils";
 import RegionDetailPage from "./RegionDetailPage";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -54,8 +70,6 @@ const KNOWN_ISSUE_TYPES = [
   "Brand Issue",
   "Technical/Product Issue",
   "After-Sales & Support Issue",
-  "Satisfied",
-  "Feedback-Form Sent",
 ];
 
 // ─── Issue Category Classification ───────────────────────────────────────────
@@ -66,45 +80,48 @@ export const ISSUE_CATEGORIES = [
     label: "FSE Issue",
     color:
       "bg-indigo-100 text-indigo-800 border-indigo-300 hover:bg-indigo-200",
+    accent: "#6366f1",
+    bgLight: "bg-indigo-50",
+    textAccent: "text-indigo-700",
+    borderAccent: "border-indigo-300",
   },
   {
     key: "Operation and Scheduling Issue",
     label: "Operation & Scheduling",
     color: "bg-amber-100 text-amber-800 border-amber-300 hover:bg-amber-200",
+    accent: "#f59e0b",
+    bgLight: "bg-amber-50",
+    textAccent: "text-amber-700",
+    borderAccent: "border-amber-300",
   },
   {
     key: "Brand Issue",
     label: "Brand Issue",
     color: "bg-rose-100 text-rose-800 border-rose-300 hover:bg-rose-200",
+    accent: "#f43f5e",
+    bgLight: "bg-rose-50",
+    textAccent: "text-rose-700",
+    borderAccent: "border-rose-300",
   },
   {
     key: "Technical and Product Issue",
     label: "Technical & Product",
     color:
       "bg-violet-100 text-violet-800 border-violet-300 hover:bg-violet-200",
+    accent: "#8b5cf6",
+    bgLight: "bg-violet-50",
+    textAccent: "text-violet-700",
+    borderAccent: "border-violet-300",
   },
   {
     key: "After-Sales Issue",
     label: "After-Sales Issue",
     color:
       "bg-orange-100 text-orange-800 border-orange-300 hover:bg-orange-200",
-  },
-  {
-    key: "Satisfied",
-    label: "Satisfied",
-    color:
-      "bg-emerald-100 text-emerald-800 border-emerald-300 hover:bg-emerald-200",
-  },
-  {
-    key: "FeedbackFormSent",
-    label: "Feedback-Form Sent",
-    color: "bg-sky-100 text-sky-800 border-sky-300 hover:bg-sky-200",
-  },
-  {
-    key: "Wow Factor",
-    label: "Wow Factor",
-    color:
-      "bg-yellow-100 text-yellow-800 border-yellow-300 hover:bg-yellow-200",
+    accent: "#f97316",
+    bgLight: "bg-orange-50",
+    textAccent: "text-orange-700",
+    borderAccent: "border-orange-300",
   },
 ] as const;
 
@@ -126,13 +143,6 @@ export function classifyIssue(rawText: string): CategoryKey[] {
     matched.push("Technical and Product Issue");
   if (t.includes("after") || t.includes("support"))
     matched.push("After-Sales Issue");
-  // "Satisfied" — matches "satisf" but NOT google/form keywords
-  const hasGoogle =
-    t.includes("google") || t.includes("sent google") || t.includes("form");
-  if (t.includes("satisf") && !hasGoogle) matched.push("Satisfied");
-  // "FeedbackFormSent" — matches google form / sent google / form keywords
-  if (hasGoogle) matched.push("FeedbackFormSent");
-  if (t.includes("wow")) matched.push("Wow Factor");
   return matched;
 }
 
@@ -143,9 +153,6 @@ const ISSUE_ACTIONS: Record<string, string> = {
   "Brand Issue": "Coordinate with brand team for product improvements",
   "Technical and Product Issue": "Escalate technical issues to product support",
   "After-Sales Issue": "Strengthen after-sales follow-up process",
-  Satisfied: "Maintain current service standards",
-  FeedbackFormSent: "Ensure follow-up on form responses",
-  "Wow Factor": "Recognize and replicate best practices",
 };
 
 // Category key → color for chips in region analysis
@@ -157,13 +164,14 @@ const CATEGORY_CHIP_COLORS: Record<string, string> = {
   "Technical and Product Issue":
     "bg-violet-100 text-violet-800 border-violet-300",
   "After-Sales Issue": "bg-orange-100 text-orange-800 border-orange-300",
-  Satisfied: "bg-emerald-100 text-emerald-800 border-emerald-300",
-  FeedbackFormSent: "bg-sky-100 text-sky-800 border-sky-300",
-  "Wow Factor": "bg-yellow-100 text-yellow-800 border-yellow-300",
 };
 
 function getCategoryLabel(key: string): string {
   return ISSUE_CATEGORIES.find((c) => c.key === key)?.label ?? key;
+}
+
+function getCategoryMeta(key: string) {
+  return ISSUE_CATEGORIES.find((c) => c.key === key);
 }
 
 const BRAND_COLORS: Record<string, string> = {
@@ -185,24 +193,13 @@ const PAGE_SIZE = 15;
 
 // ─── Date Formatting ─────────────────────────────────────────────────────────
 
-/**
- * Formats a date string or timestamp to DD/MM/YYYY.
- * Handles: ISO strings, unix timestamps (sec or ms), DD-MM-YYYY, DD/MM/YYYY.
- */
 export function formatDisplayDate(dateStr: string | null | undefined): string {
   if (!dateStr) return "—";
   const raw = String(dateStr).trim();
-
-  // Already DD/MM/YYYY
   if (/^\d{2}\/\d{2}\/\d{4}$/.test(raw)) return raw;
-
-  // DD-MM-YYYY → DD/MM/YYYY
   if (/^\d{2}-\d{2}-\d{4}$/.test(raw)) return raw.replace(/-/g, "/");
-
-  // Pure numeric — could be unix timestamp
   if (/^\d+$/.test(raw)) {
     const num = Number(raw);
-    // Seconds (Unix timestamps before year 3000 are < ~32e9)
     const d = num < 1e12 ? new Date(num * 1000) : new Date(num);
     if (!Number.isNaN(d.getTime())) {
       const dd = String(d.getDate()).padStart(2, "0");
@@ -211,8 +208,6 @@ export function formatDisplayDate(dateStr: string | null | undefined): string {
       return `${dd}/${mm}/${yyyy}`;
     }
   }
-
-  // ISO string or any Date-parseable string
   const d = new Date(raw);
   if (!Number.isNaN(d.getTime())) {
     const dd = String(d.getDate()).padStart(2, "0");
@@ -220,9 +215,36 @@ export function formatDisplayDate(dateStr: string | null | undefined): string {
     const yyyy = d.getFullYear();
     return `${dd}/${mm}/${yyyy}`;
   }
-
-  // Fallback: return as-is
   return raw;
+}
+
+/** Parse a date string to a local-time Date object (returns null on failure) */
+function parseDateLocal(dateStr: string | null | undefined): Date | null {
+  if (!dateStr) return null;
+  const raw = String(dateStr).trim();
+  // DD/MM/YYYY or DD-MM-YYYY
+  const dmyMatch = raw.match(/^(\d{2})[\/\-](\d{2})[\/\-](\d{4})$/);
+  if (dmyMatch) {
+    return new Date(
+      Number(dmyMatch[3]),
+      Number(dmyMatch[2]) - 1,
+      Number(dmyMatch[1]),
+    );
+  }
+  // Pure numeric timestamp
+  if (/^\d+$/.test(raw)) {
+    const num = Number(raw);
+    return num < 1e12 ? new Date(num * 1000) : new Date(num);
+  }
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/** Return "Mon YYYY" from a date string */
+function toMonthYear(dateStr: string | null | undefined): string {
+  const d = parseDateLocal(dateStr);
+  if (!d) return "Unknown";
+  return d.toLocaleDateString("en-IN", { month: "short", year: "numeric" });
 }
 
 // ─── Unified display type ─────────────────────────────────────────────────────
@@ -237,6 +259,7 @@ interface DisplayRecord {
   product: string;
   cesScore: number;
   remark: string;
+  dateOfVisit: string;
   callDate: string;
   agent: string;
   source: "sheet" | "manual";
@@ -246,32 +269,6 @@ interface DisplayRecord {
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
-
-function cesToStars(ces: number): number {
-  return Math.round((ces / 40) * 5 * 2) / 2;
-}
-
-function StarRating({ score }: { score: number }) {
-  const stars = cesToStars(score);
-  return (
-    <div className="flex items-center gap-0.5">
-      {[1, 2, 3, 4, 5].map((i) => {
-        const filled = stars >= i;
-        const half = !filled && stars >= i - 0.5;
-        return (
-          <span
-            key={i}
-            className={`text-lg leading-none ${
-              filled || half ? "text-amber-400" : "text-muted-foreground/30"
-            }`}
-          >
-            {filled ? "\u2605" : half ? "\u2bd0" : "\u2606"}
-          </span>
-        );
-      })}
-    </div>
-  );
-}
 
 function CesBadge({ score }: { score: number }) {
   const isLow = score < 30;
@@ -286,34 +283,6 @@ function CesBadge({ score }: { score: number }) {
       {score}/40
     </span>
   );
-}
-
-type ViewMode = "table" | "masonry";
-
-const EMPTY_FORM = {
-  fiplCode: "",
-  customerName: "",
-  contact: "",
-  brand:
-    Variant_tineco_ecovacs_coway_kuvings_instant.ecovacs as Variant_tineco_ecovacs_coway_kuvings_instant,
-  product: "",
-  cesScore: 35,
-  remark: "",
-  callDate: "",
-  agent: "",
-};
-
-function brandEnumToStr(
-  b: Variant_tineco_ecovacs_coway_kuvings_instant,
-): string {
-  const map: Record<string, string> = {
-    [Variant_tineco_ecovacs_coway_kuvings_instant.ecovacs]: "Ecovacs",
-    [Variant_tineco_ecovacs_coway_kuvings_instant.kuvings]: "Kuvings",
-    [Variant_tineco_ecovacs_coway_kuvings_instant.coway]: "Coway",
-    [Variant_tineco_ecovacs_coway_kuvings_instant.tineco]: "Tineco",
-    [Variant_tineco_ecovacs_coway_kuvings_instant.instant]: "Instant",
-  };
-  return map[String(b)] ?? String(b);
 }
 
 const normalizeKey = (s: string) =>
@@ -334,10 +303,7 @@ interface RegionStat {
 }
 
 function computeRegionStats(records: DisplayRecord[]): RegionStat[] {
-  // Only negative records for analysis
   const negRecords = records.filter((r) => r.cesScore < 30);
-
-  // Count per region
   const regionNegCount: Record<string, number> = {};
   const regionTotalCount: Record<string, number> = {};
   const regionIssueFreq: Record<string, Record<string, number>> = {};
@@ -346,12 +312,10 @@ function computeRegionStats(records: DisplayRecord[]): RegionStat[] {
     const reg = r.region || "Unknown";
     regionTotalCount[reg] = (regionTotalCount[reg] ?? 0) + 1;
   }
-
   for (const r of negRecords) {
     const reg = r.region || "Unknown";
     regionNegCount[reg] = (regionNegCount[reg] ?? 0) + 1;
-    const cats = classifyIssue(r.typeOfIssue);
-    for (const cat of cats) {
+    for (const cat of classifyIssue(r.typeOfIssue)) {
       if (!regionIssueFreq[reg]) regionIssueFreq[reg] = {};
       regionIssueFreq[reg][cat] = (regionIssueFreq[reg][cat] ?? 0) + 1;
     }
@@ -382,7 +346,6 @@ function computeRegionStats(records: DisplayRecord[]): RegionStat[] {
         ? (ISSUE_ACTIONS[topIssueKey] ??
           "Review and address recurring complaints")
         : "No negative feedback";
-
     stats.push({
       region,
       negativeCount: negCount,
@@ -392,7 +355,6 @@ function computeRegionStats(records: DisplayRecord[]): RegionStat[] {
       action,
     });
   }
-
   return stats.sort((a, b) => b.negativeCount - a.negativeCount);
 }
 
@@ -409,7 +371,6 @@ function RegionAnalysisPanel({
     () => Math.max(1, ...stats.map((s) => s.negativeCount)),
     [stats],
   );
-
   if (stats.length === 0) return null;
 
   return (
@@ -417,7 +378,6 @@ function RegionAnalysisPanel({
       className="rounded-xl border bg-card shadow-sm overflow-hidden"
       data-ocid="feedback.region_analysis"
     >
-      {/* Panel header */}
       <button
         type="button"
         onClick={() => setCollapsed((c) => !c)}
@@ -450,7 +410,6 @@ function RegionAnalysisPanel({
                 ? (CATEGORY_CHIP_COLORS[s.topIssueKey] ??
                   "bg-muted text-muted-foreground border-border")
                 : "bg-muted text-muted-foreground border-border";
-
             return (
               <button
                 key={s.region}
@@ -463,7 +422,6 @@ function RegionAnalysisPanel({
                 }`}
                 data-ocid={`feedback.region.${s.region.toLowerCase().replace(/\s+/g, "_")}`}
               >
-                {/* Region name + priority badge */}
                 <div className="flex items-center gap-2 min-w-[160px]">
                   <span className="font-semibold text-sm">{s.region}</span>
                   {isWorst && (
@@ -472,8 +430,6 @@ function RegionAnalysisPanel({
                     </span>
                   )}
                 </div>
-
-                {/* Negative count + bar */}
                 <div className="flex items-center gap-2 min-w-[130px]">
                   <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold border bg-red-100 text-red-700 border-red-300 shrink-0">
                     {s.negativeCount} negative
@@ -482,8 +438,6 @@ function RegionAnalysisPanel({
                     / {s.totalCount} total
                   </span>
                 </div>
-
-                {/* Progress bar */}
                 <div className="flex-1 min-w-[80px]">
                   <div className="h-1.5 rounded-full bg-muted overflow-hidden">
                     <div
@@ -492,8 +446,6 @@ function RegionAnalysisPanel({
                     />
                   </div>
                 </div>
-
-                {/* Top issue chip */}
                 <div className="min-w-[140px]">
                   {s.topIssueKey ? (
                     <span
@@ -507,12 +459,9 @@ function RegionAnalysisPanel({
                     </span>
                   )}
                 </div>
-
-                {/* Recommended action */}
                 <div className="flex-1 text-xs text-muted-foreground italic min-w-[200px]">
                   → {s.action}
                 </div>
-                {/* View details */}
                 <span className="text-xs font-medium text-primary hover:underline shrink-0">
                   View Details →
                 </span>
@@ -525,7 +474,1333 @@ function RegionAnalysisPanel({
   );
 }
 
+// ─── Issue Insights Dashboard ─────────────────────────────────────────────────
+
+interface IssueInsightData {
+  key: CategoryKey;
+  label: string;
+  count: number;
+  pctOfTotal: number;
+  topRegions: string[];
+  barWidth: number; // 0-100 relative to max
+  accent: string;
+  color: string;
+  bgLight: string;
+  textAccent: string;
+  borderAccent: string;
+}
+
+function computeIssueInsights(
+  records: DisplayRecord[],
+  filterRegion: string,
+  filterSearch: string,
+): IssueInsightData[] {
+  const q = filterSearch.trim().toLowerCase();
+  const src = records.filter((r) => {
+    const matchRegion = !filterRegion || r.region === filterRegion;
+    return matchRegion;
+  });
+
+  const counts: Record<CategoryKey, number> = {
+    "FSE Issue": 0,
+    "Operation and Scheduling Issue": 0,
+    "Brand Issue": 0,
+    "Technical and Product Issue": 0,
+    "After-Sales Issue": 0,
+  };
+  const regionFreq: Record<CategoryKey, Record<string, number>> = {
+    "FSE Issue": {},
+    "Operation and Scheduling Issue": {},
+    "Brand Issue": {},
+    "Technical and Product Issue": {},
+    "After-Sales Issue": {},
+  };
+
+  for (const r of src) {
+    for (const cat of classifyIssue(r.typeOfIssue)) {
+      counts[cat]++;
+      const reg = r.region || "Unknown";
+      regionFreq[cat][reg] = (regionFreq[cat][reg] ?? 0) + 1;
+    }
+  }
+
+  const total = src.length || 1;
+  const maxCount = Math.max(1, ...Object.values(counts));
+
+  return (ISSUE_CATEGORIES as unknown as (typeof ISSUE_CATEGORIES)[number][])
+    .map((cat) => {
+      const key = (cat as (typeof ISSUE_CATEGORIES)[number]).key as CategoryKey;
+      const count = counts[key] ?? 0;
+      const topRegions = Object.entries(regionFreq[key] ?? {})
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([r]) => r);
+      const item: IssueInsightData = {
+        key,
+        label: cat.label,
+        count,
+        pctOfTotal: Math.round((count / total) * 100),
+        topRegions,
+        barWidth: Math.round((count / maxCount) * 100),
+        accent: (cat as { accent: string }).accent,
+        color: cat.color,
+        bgLight: (cat as { bgLight: string }).bgLight,
+        textAccent: (cat as { textAccent: string }).textAccent,
+        borderAccent: (cat as { borderAccent: string }).borderAccent,
+      };
+      return item;
+    })
+    .filter((d) => !q || d.label.toLowerCase().includes(q))
+    .sort((a, b) => b.count - a.count);
+}
+
+// ─── Drill-down helpers ───────────────────────────────────────────────────────
+
+function getImpactLevel(records: DisplayRecord[]): {
+  label: string;
+  color: string;
+} {
+  if (records.length === 0)
+    return { label: "No Data", color: "bg-muted text-muted-foreground" };
+  const negPct = records.filter((r) => r.cesScore < 30).length / records.length;
+  if (negPct > 0.5)
+    return {
+      label: "High Impact",
+      color: "bg-red-100 text-red-700 border border-red-300",
+    };
+  if (negPct >= 0.25)
+    return {
+      label: "Medium Impact",
+      color: "bg-amber-100 text-amber-700 border border-amber-300",
+    };
+  return {
+    label: "Low Impact",
+    color: "bg-emerald-100 text-emerald-700 border border-emerald-300",
+  };
+}
+
+function buildTrendData(
+  records: DisplayRecord[],
+): { month: string; count: number }[] {
+  const freq: Record<string, number> = {};
+  for (const r of records) {
+    const m = toMonthYear(r.dateOfVisit);
+    freq[m] = (freq[m] ?? 0) + 1;
+  }
+  // Sort by date
+  const entries = Object.entries(freq).map(([month, count]) => {
+    const d = parseDateLocal(
+      records.find((r) => toMonthYear(r.dateOfVisit) === month)?.dateOfVisit,
+    );
+    return { month, count, ts: d?.getTime() ?? 0 };
+  });
+  entries.sort((a, b) => a.ts - b.ts);
+  return entries.slice(-12).map(({ month, count }) => ({ month, count }));
+}
+
+function buildResolutionData(
+  records: DisplayRecord[],
+): { name: string; count: number; pct: number }[] {
+  const freq: Record<string, number> = {};
+  for (const r of records) {
+    const res = r.resolution?.trim() || "Not Specified";
+    freq[res] = (freq[res] ?? 0) + 1;
+  }
+  const total = records.length || 1;
+  return Object.entries(freq)
+    .map(([name, count]) => ({
+      name,
+      count,
+      pct: Math.round((count / total) * 100),
+    }))
+    .sort((a, b) => b.count - a.count);
+}
+
+// Pie chart colors
+const PIE_COLORS = [
+  "#6366f1",
+  "#f59e0b",
+  "#f43f5e",
+  "#8b5cf6",
+  "#f97316",
+  "#10b981",
+  "#0ea5e9",
+  "#eab308",
+];
+
+// ─── Remark Categories (defined outside component for stable reference) ──────
+
+interface RemarkCategory {
+  name: string;
+  keywords: string[];
+  color: string;
+  bgColor: string;
+  borderColor: string;
+}
+
+const REMARK_CATEGORIES: RemarkCategory[] = [
+  {
+    name: "Service Quality",
+    keywords: [
+      "service",
+      "support",
+      "helpful",
+      "professional",
+      "staff",
+      "behavior",
+      "attitude",
+      "rude",
+      "polite",
+      "cooperative",
+    ],
+    color: "text-blue-700",
+    bgColor: "bg-blue-50",
+    borderColor: "border-blue-200",
+  },
+  {
+    name: "Product Issues",
+    keywords: [
+      "product",
+      "defect",
+      "quality",
+      "damaged",
+      "broken",
+      "malfunction",
+      "faulty",
+      "poor quality",
+    ],
+    color: "text-rose-700",
+    bgColor: "bg-rose-50",
+    borderColor: "border-rose-200",
+  },
+  {
+    name: "Delivery & Visit Issues",
+    keywords: [
+      "delay",
+      "late",
+      "visit",
+      "arrive",
+      "schedule",
+      "time",
+      "appointment",
+      "missed",
+    ],
+    color: "text-amber-700",
+    bgColor: "bg-amber-50",
+    borderColor: "border-amber-200",
+  },
+  {
+    name: "Documentation & Process",
+    keywords: [
+      "form",
+      "document",
+      "process",
+      "paperwork",
+      "record",
+      "update",
+      "portal",
+    ],
+    color: "text-violet-700",
+    bgColor: "bg-violet-50",
+    borderColor: "border-violet-200",
+  },
+  {
+    name: "Communication Issues",
+    keywords: [
+      "call",
+      "contact",
+      "response",
+      "follow up",
+      "inform",
+      "communication",
+      "message",
+    ],
+    color: "text-cyan-700",
+    bgColor: "bg-cyan-50",
+    borderColor: "border-cyan-200",
+  },
+  {
+    name: "Resolution & Follow-up",
+    keywords: [
+      "resolve",
+      "pending",
+      "complaint",
+      "issue",
+      "problem",
+      "follow up",
+      "unresolved",
+      "callback",
+    ],
+    color: "text-orange-700",
+    bgColor: "bg-orange-50",
+    borderColor: "border-orange-200",
+  },
+  {
+    name: "Positive Feedback",
+    keywords: [
+      "good",
+      "great",
+      "excellent",
+      "satisfied",
+      "happy",
+      "pleased",
+      "well done",
+      "perfect",
+      "amazing",
+      "wonderful",
+    ],
+    color: "text-emerald-700",
+    bgColor: "bg-emerald-50",
+    borderColor: "border-emerald-200",
+  },
+];
+
+const OTHER_REMARK_CAT: RemarkCategory = {
+  name: "Other",
+  keywords: [],
+  color: "text-slate-700",
+  bgColor: "bg-slate-50",
+  borderColor: "border-slate-200",
+};
+
+// ─── Issue Drill-down Component ───────────────────────────────────────────────
+
+function IssueDrillDown({
+  categoryKey,
+  allRecords,
+  onBack,
+  onSelectEmployee,
+}: {
+  categoryKey: CategoryKey;
+  allRecords: DisplayRecord[];
+  onBack: () => void;
+  onSelectEmployee?: (fiplCode: string) => void;
+}) {
+  const meta = getCategoryMeta(categoryKey);
+  const records = useMemo(
+    () =>
+      allRecords.filter((r) =>
+        classifyIssue(r.typeOfIssue).includes(categoryKey),
+      ),
+    [allRecords, categoryKey],
+  );
+
+  const total = records.length;
+  const totalAll = allRecords.length || 1;
+  const repeatPct = Math.round((total / totalAll) * 100);
+  const impact = getImpactLevel(records);
+  const avgCes =
+    total > 0 ? records.reduce((s, r) => s + r.cesScore, 0) / total : 0;
+
+  // Affected regions
+  const affectedRegions = useMemo(() => {
+    const freq: Record<string, number> = {};
+    for (const r of records) {
+      const reg = r.region || "Unknown";
+      freq[reg] = (freq[reg] ?? 0) + 1;
+    }
+    return Object.entries(freq)
+      .sort((a, b) => b[1] - a[1])
+      .map(([r]) => r);
+  }, [records]);
+
+  // Top FSE
+  const topFSE = useMemo(() => {
+    const freq: Record<string, { name: string; count: number }> = {};
+    for (const r of records) {
+      const key = r.fiplCode || r.fseName || "Unknown";
+      if (!freq[key])
+        freq[key] = { name: r.fseName || r.fiplCode || "Unknown", count: 0 };
+      freq[key].count++;
+    }
+    const sorted = Object.values(freq).sort((a, b) => b.count - a.count);
+    return sorted[0] ?? null;
+  }, [records]);
+
+  // Trend
+  const trendData = useMemo(() => buildTrendData(records), [records]);
+
+  // ─── Categorized Remarks ──────────────────────────────────────────────────
+  // Assign each record's remark to categories
+  const categorizedRemarks = useMemo(() => {
+    const catMap: Record<
+      string,
+      { cat: RemarkCategory; records: DisplayRecord[] }
+    > = {};
+    for (const cat of REMARK_CATEGORIES) {
+      catMap[cat.name] = { cat, records: [] };
+    }
+    catMap.Other = { cat: OTHER_REMARK_CAT, records: [] };
+
+    for (const rec of records) {
+      if (!rec.remark?.trim()) continue;
+      const remarkLower = rec.remark.toLowerCase();
+      let matched = false;
+      for (const cat of REMARK_CATEGORIES) {
+        if (cat.keywords.some((kw) => remarkLower.includes(kw))) {
+          catMap[cat.name].records.push(rec);
+          matched = true;
+        }
+      }
+      if (!matched) catMap.Other.records.push(rec);
+    }
+    return Object.values(catMap).filter((c) => c.records.length > 0);
+  }, [records]);
+
+  // Brand breakdown
+  const brandData = useMemo(() => {
+    const freq: Record<string, number> = {};
+    for (const r of records) {
+      const b = r.brand || "Unknown";
+      freq[b] = (freq[b] ?? 0) + 1;
+    }
+    return Object.entries(freq)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([name, count]) => ({ name, count }));
+  }, [records]);
+
+  // Product breakdown
+  const productData = useMemo(() => {
+    const freq: Record<string, number> = {};
+    for (const r of records) {
+      const p = r.product || "Unknown";
+      freq[p] = (freq[p] ?? 0) + 1;
+    }
+    return Object.entries(freq)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([name, count]) => ({ name, count }));
+  }, [records]);
+
+  // Resolution data
+  const resolutionData = useMemo(() => buildResolutionData(records), [records]);
+
+  // Employee table
+  const employeeData = useMemo(() => {
+    const map: Record<
+      string,
+      {
+        name: string;
+        fiplCode: string;
+        region: string;
+        count: number;
+        cesSum: number;
+      }
+    > = {};
+    for (const r of records) {
+      const k = r.fiplCode || r.fseName || "Unknown";
+      if (!map[k])
+        map[k] = {
+          name: r.fseName || r.fiplCode || "Unknown",
+          fiplCode: r.fiplCode,
+          region: r.region,
+          count: 0,
+          cesSum: 0,
+        };
+      map[k].count++;
+      map[k].cesSum += r.cesScore;
+    }
+    return Object.values(map)
+      .map((e) => ({ ...e, avgCes: e.count > 0 ? e.cesSum / e.count : 0 }))
+      .sort((a, b) => b.count - a.count);
+  }, [records]);
+
+  const maxBrandCount = Math.max(1, ...brandData.map((d) => d.count));
+  const maxProductCount = Math.max(1, ...productData.map((d) => d.count));
+  const [selectedRemarkCategory, setSelectedRemarkCategory] = useState<
+    string | null
+  >(null);
+
+  // Password gate for export in drilldown
+  const { granted: exportGranted } = usePasswordGate("export");
+  const [pendingExportGate, setPendingExportGate] = useState(false);
+
+  const runExport = () => {
+    const filename = buildFilename(`Issue_${meta?.label ?? categoryKey}`);
+    exportToExcel({
+      filename,
+      filters: { "Issue Type": meta?.label ?? categoryKey },
+      sheets: [
+        {
+          name: "Issue Detail",
+          data: records.map((r) => ({
+            "Employee Name": r.fseName || r.fiplCode || "—",
+            "FIPL Code": r.fiplCode,
+            "Customer Name": r.customerName,
+            "CES Score": r.cesScore,
+            "Date of Visit": formatDisplayDate(r.dateOfVisit),
+            Agent: r.agent || "—",
+            "Type of Issue": r.typeOfIssue || "—",
+            Resolution: r.resolution || "—",
+            Remarks: r.remark || "—",
+          })),
+          columns: [
+            { key: "Employee Name", header: "Employee Name", width: 22 },
+            { key: "FIPL Code", header: "FIPL Code", width: 14 },
+            { key: "Customer Name", header: "Customer Name", width: 22 },
+            { key: "CES Score", header: "CES Score", width: 12 },
+            { key: "Date of Visit", header: "Date of Visit", width: 14 },
+            { key: "Agent", header: "Agent", width: 18 },
+            { key: "Type of Issue", header: "Type of Issue", width: 28 },
+            { key: "Resolution", header: "Resolution", width: 28 },
+            { key: "Remarks", header: "Remarks", width: 45 },
+          ],
+        },
+      ],
+    });
+  };
+
+  const handleExportClick = () => {
+    if (exportGranted) {
+      runExport();
+    } else {
+      setPendingExportGate(true);
+    }
+  };
+
+  return (
+    <div className="space-y-6" data-ocid="feedback.issue_drilldown">
+      {/* Back + heading */}
+      <div className="flex items-center gap-3">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={onBack}
+          data-ocid="feedback.issue_drilldown_back"
+        >
+          <ArrowLeft className="w-4 h-4 mr-1" /> Back to Issues Overview
+        </Button>
+        <button
+          type="button"
+          data-ocid="feedback.issue_drilldown_export_button"
+          onClick={handleExportClick}
+          className="inline-flex items-center gap-1.5 rounded-md border border-indigo-300 bg-background px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-600 hover:text-white hover:border-indigo-600 transition-colors shadow-sm"
+        >
+          <Download className="w-3.5 h-3.5" />
+          Export This Issue
+        </button>
+      </div>
+      {pendingExportGate && (
+        <PasswordGate
+          gateKey="export"
+          onUnlock={() => {
+            setPendingExportGate(false);
+            runExport();
+          }}
+          onCancel={() => setPendingExportGate(false)}
+        />
+      )}
+
+      {/* SECTION 1 — OVERVIEW */}
+      <div
+        className={`rounded-xl border shadow-sm overflow-hidden ${meta?.bgLight ?? "bg-card"}`}
+        data-ocid="feedback.issue_overview"
+      >
+        <div
+          className={`px-6 py-4 border-b ${meta?.borderAccent ?? "border-border"}`}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2
+                className={`text-xl font-bold tracking-tight ${meta?.textAccent ?? "text-foreground"}`}
+              >
+                {meta?.label ?? categoryKey}
+              </h2>
+              <p className="text-sm text-muted-foreground mt-0.5">
+                Detailed analysis for this issue type
+              </p>
+            </div>
+            <span
+              className={`inline-flex items-center rounded-full px-3 py-1 text-sm font-semibold ${impact.color}`}
+            >
+              {impact.label}
+            </span>
+          </div>
+        </div>
+
+        <div className="p-6 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+          {/* Total Cases */}
+          <div className="flex flex-col items-center justify-center bg-card rounded-lg border p-4 shadow-sm text-center">
+            <span className="text-3xl font-bold text-foreground">{total}</span>
+            <span className="text-xs text-muted-foreground mt-1 font-medium">
+              Total Cases
+            </span>
+          </div>
+          {/* Repeat % */}
+          <div className="flex flex-col items-center justify-center bg-card rounded-lg border p-4 shadow-sm text-center">
+            <span className="text-3xl font-bold text-foreground">
+              {repeatPct}%
+            </span>
+            <span className="text-xs text-muted-foreground mt-1 font-medium">
+              of All Feedback
+            </span>
+          </div>
+          {/* Avg CES */}
+          <div className="flex flex-col items-center justify-center bg-card rounded-lg border p-4 shadow-sm text-center">
+            <span
+              className={`text-3xl font-bold ${avgCes < 30 ? "text-red-600" : "text-emerald-600"}`}
+            >
+              {avgCes.toFixed(1)}
+            </span>
+            <span className="text-xs text-muted-foreground mt-1 font-medium">
+              Avg CES Score
+            </span>
+          </div>
+          {/* Top FSE */}
+          <div className="flex flex-col items-center justify-center bg-card rounded-lg border p-4 shadow-sm text-center">
+            <span className="text-sm font-bold text-foreground truncate max-w-full">
+              {topFSE?.name ?? "—"}
+            </span>
+            <span className="text-xs text-muted-foreground mt-1 font-medium">
+              Top FSE {topFSE ? `(${topFSE.count} cases)` : ""}
+            </span>
+          </div>
+          {/* Affected regions */}
+          <div className="flex flex-col items-start justify-center bg-card rounded-lg border p-4 shadow-sm col-span-2 sm:col-span-1 lg:col-span-1">
+            <span className="text-xs text-muted-foreground font-medium mb-2">
+              Affected Regions
+            </span>
+            <div className="flex flex-wrap gap-1">
+              {affectedRegions.slice(0, 4).map((reg) => (
+                <span
+                  key={reg}
+                  className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border bg-card text-foreground border-border"
+                >
+                  {reg}
+                </span>
+              ))}
+              {affectedRegions.length > 4 && (
+                <span className="text-xs text-muted-foreground">
+                  +{affectedRegions.length - 4} more
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* SECTION 2 — TRENDS */}
+      <div
+        className="rounded-xl border bg-card shadow-sm p-6"
+        data-ocid="feedback.issue_trend"
+      >
+        <h3 className="text-base font-semibold mb-4">
+          📈 Issue Trend Over Time
+        </h3>
+        {trendData.length === 0 ? (
+          <p className="text-sm text-muted-foreground text-center py-8">
+            No dated records found
+          </p>
+        ) : (
+          <ResponsiveContainer width="100%" height={220}>
+            <LineChart
+              data={trendData}
+              margin={{ top: 5, right: 20, left: 0, bottom: 5 }}
+            >
+              <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+              <XAxis dataKey="month" tick={{ fontSize: 11 }} />
+              <YAxis allowDecimals={false} tick={{ fontSize: 11 }} />
+              <Tooltip />
+              <Line
+                type="monotone"
+                dataKey="count"
+                stroke={meta?.accent ?? "#6366f1"}
+                strokeWidth={2}
+                dot={{ r: 4, fill: meta?.accent ?? "#6366f1" }}
+                name="Cases"
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        )}
+      </div>
+
+      {/* SECTION 3 — ROOT CAUSES */}
+      <div
+        className="rounded-xl border bg-card shadow-sm p-6 space-y-6"
+        data-ocid="feedback.issue_root_causes"
+      >
+        <h3 className="text-base font-semibold">🔍 Root Causes & Context</h3>
+
+        {/* Top Remarks — Categorized */}
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-sm font-medium text-muted-foreground">
+              Top Remarks
+            </p>
+            {selectedRemarkCategory && (
+              <button
+                type="button"
+                onClick={() => setSelectedRemarkCategory(null)}
+                className="text-xs text-primary hover:underline flex items-center gap-1"
+              >
+                <ArrowLeft className="w-3 h-3" /> Back to categories
+              </button>
+            )}
+          </div>
+
+          {categorizedRemarks.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No remarks available
+            </p>
+          ) : selectedRemarkCategory ? (
+            /* Detail view: all remarks in selected category */
+            (() => {
+              const catData = categorizedRemarks.find(
+                (c) => c.cat.name === selectedRemarkCategory,
+              );
+              if (!catData) return null;
+              return (
+                <div className="space-y-2">
+                  <div
+                    className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-semibold border mb-2 ${catData.cat.bgColor} ${catData.cat.color} ${catData.cat.borderColor}`}
+                  >
+                    {catData.cat.name}
+                    <span className="opacity-60">
+                      ({catData.records.length})
+                    </span>
+                  </div>
+                  <div
+                    className="space-y-2 overflow-y-auto pr-1"
+                    style={{ maxHeight: 320 }}
+                  >
+                    {catData.records.map((rec, ri) => (
+                      <div
+                        key={`${rec.id}-${ri}`}
+                        className={`rounded-lg border p-3 ${catData.cat.bgColor} ${catData.cat.borderColor}`}
+                      >
+                        <div className="flex items-center justify-between gap-2 mb-1.5 flex-wrap">
+                          <span className="text-xs font-semibold text-foreground">
+                            {rec.fseName || rec.fiplCode || "—"}
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <CesBadge score={rec.cesScore} />
+                            <span className="text-xs text-muted-foreground">
+                              {formatDisplayDate(rec.dateOfVisit)}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="text-xs text-muted-foreground mb-1">
+                          Customer: {rec.customerName || "—"} &nbsp;·&nbsp;
+                          Issue: {rec.typeOfIssue || "—"}
+                        </div>
+                        <p className="text-sm text-foreground leading-relaxed">
+                          {rec.remark || "—"}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()
+          ) : (
+            /* Category chips view */
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+              {categorizedRemarks.map((c) => (
+                <button
+                  key={c.cat.name}
+                  type="button"
+                  onClick={() => setSelectedRemarkCategory(c.cat.name)}
+                  className={`group rounded-xl border p-3 text-left transition-all hover:shadow-md hover:-translate-y-0.5 ${c.cat.bgColor} ${c.cat.borderColor}`}
+                  data-ocid={`feedback.remark_category.${c.cat.name.toLowerCase().replace(/\s+/g, "_")}`}
+                >
+                  <div className="flex items-center justify-between gap-1 mb-1">
+                    <span
+                      className={`text-xs font-bold leading-snug ${c.cat.color}`}
+                    >
+                      {c.cat.name}
+                    </span>
+                    <span
+                      className={`text-xs font-bold px-1.5 py-0.5 rounded-full border bg-white/60 ${c.cat.color} ${c.cat.borderColor}`}
+                    >
+                      {c.records.length}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground line-clamp-2 mt-1">
+                    {c.records[0]?.remark?.slice(0, 60) ?? "—"}
+                    {(c.records[0]?.remark?.length ?? 0) > 60 ? "…" : ""}
+                  </p>
+                  <span
+                    className={`text-[10px] font-semibold ${c.cat.color} group-hover:underline mt-1 block`}
+                  >
+                    View all →
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Brand Breakdown — full width */}
+        <div>
+          <p className="text-sm font-medium text-muted-foreground mb-3">
+            Brand Breakdown
+          </p>
+          <div className="space-y-2">
+            {brandData.map((b) => (
+              <div key={b.name} className="flex items-center gap-2">
+                <span className="text-xs w-28 truncate font-medium">
+                  {b.name}
+                </span>
+                <div className="flex-1 h-2 rounded-full bg-muted overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all duration-500"
+                    style={{
+                      width: `${Math.round((b.count / maxBrandCount) * 100)}%`,
+                      background: meta?.accent ?? "#6366f1",
+                    }}
+                  />
+                </div>
+                <span className="text-xs text-muted-foreground w-8 text-right">
+                  {b.count}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Product Breakdown — full width, below brand */}
+        <div>
+          <p className="text-sm font-medium text-muted-foreground mb-3">
+            Product Breakdown
+          </p>
+          <div className="space-y-2">
+            {productData.map((p) => (
+              <div key={p.name} className="flex items-center gap-2">
+                <span className="text-xs w-28 truncate font-medium">
+                  {p.name}
+                </span>
+                <div className="flex-1 h-2 rounded-full bg-muted overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all duration-500"
+                    style={{
+                      width: `${Math.round((p.count / maxProductCount) * 100)}%`,
+                      background: meta?.accent ?? "#6366f1",
+                    }}
+                  />
+                </div>
+                <span className="text-xs text-muted-foreground w-8 text-right">
+                  {p.count}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* SECTION 4 — RESOLUTION STATUS */}
+      <div
+        className="rounded-xl border bg-card shadow-sm p-6"
+        data-ocid="feedback.issue_resolution"
+      >
+        <h3 className="text-base font-semibold mb-4">✅ Resolution Status</h3>
+        {resolutionData.length > 0 ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+            {/* Left: donut chart + scrollable legend */}
+            <div className="flex flex-col gap-3">
+              <ResponsiveContainer width="100%" height={200}>
+                <PieChart>
+                  <Pie
+                    data={resolutionData}
+                    dataKey="count"
+                    nameKey="name"
+                    cx="50%"
+                    cy="50%"
+                    outerRadius={80}
+                    innerRadius={40}
+                    label={({ pct }: { pct: number }) =>
+                      String(pct).concat("%")
+                    }
+                    labelLine={false}
+                  >
+                    {resolutionData.map((rd, i) => (
+                      <Cell
+                        key={rd.name}
+                        fill={PIE_COLORS[i % PIE_COLORS.length]}
+                      />
+                    ))}
+                  </Pie>
+                  <Tooltip formatter={(v, n) => [v, n]} />
+                </PieChart>
+              </ResponsiveContainer>
+              {/* Custom scrollable legend — outside ResponsiveContainer to prevent overflow */}
+              <div
+                className="rounded-lg border bg-muted/30 p-3"
+                style={{ maxHeight: 150, overflowY: "auto" }}
+              >
+                <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
+                  {resolutionData.map((rd, i) => (
+                    <div
+                      key={rd.name}
+                      className="flex items-center gap-1.5 min-w-0"
+                    >
+                      <span
+                        className="inline-block w-2.5 h-2.5 rounded-sm flex-shrink-0"
+                        style={{
+                          background: PIE_COLORS[i % PIE_COLORS.length],
+                        }}
+                      />
+                      <span
+                        className="text-[11px] text-foreground truncate"
+                        title={rd.name}
+                      >
+                        {rd.name}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+            {/* Right: resolution table — scrollable body */}
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b">
+                    <th className="text-left py-2 text-xs font-medium text-muted-foreground sticky top-0 bg-card">
+                      Resolution
+                    </th>
+                    <th className="text-right py-2 text-xs font-medium text-muted-foreground sticky top-0 bg-card">
+                      Count
+                    </th>
+                    <th className="text-right py-2 text-xs font-medium text-muted-foreground sticky top-0 bg-card">
+                      %
+                    </th>
+                  </tr>
+                </thead>
+              </table>
+              <div className="overflow-y-auto" style={{ maxHeight: 200 }}>
+                <table className="w-full text-sm">
+                  <tbody>
+                    {resolutionData.map((r, i) => {
+                      const isPending =
+                        /pending|unresolved|open|not resolved/i.test(r.name);
+                      return (
+                        <tr
+                          key={r.name}
+                          className={`border-b last:border-0 ${i % 2 === 0 ? "bg-muted/20" : ""}`}
+                        >
+                          <td
+                            className={`py-1.5 px-1 text-xs ${isPending ? "text-amber-700 font-medium" : "text-foreground"}`}
+                          >
+                            <span
+                              className="inline-block w-2 h-2 rounded-full mr-2 flex-shrink-0 align-middle"
+                              style={{
+                                background: PIE_COLORS[i % PIE_COLORS.length],
+                              }}
+                            />
+                            {r.name}
+                          </td>
+                          <td className="py-1.5 text-right text-xs w-12">
+                            {r.count}
+                          </td>
+                          <td className="py-1.5 text-right text-xs text-muted-foreground w-12">
+                            {r.pct}%
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground text-center py-8">
+            No resolution data available
+          </p>
+        )}
+      </div>
+
+      {/* SECTION 5 — AFFECTED EMPLOYEES */}
+      <div
+        className="rounded-xl border bg-card shadow-sm p-6"
+        data-ocid="feedback.issue_employees"
+      >
+        <h3 className="text-base font-semibold mb-4">👥 Affected Employees</h3>
+        {onSelectEmployee && (
+          <p className="text-xs text-muted-foreground mb-3">
+            Click any row to open the employee's profile
+          </p>
+        )}
+        {employeeData.length === 0 ? (
+          <p className="text-sm text-muted-foreground text-center py-8">
+            No employee data
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-muted/50">
+                <tr>
+                  {[
+                    "FSE Name",
+                    "FIPL Code",
+                    "Region",
+                    "Case Count",
+                    "Avg CES",
+                    "",
+                  ].map((h) => (
+                    <th
+                      key={h}
+                      className="text-left px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wide whitespace-nowrap"
+                    >
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {employeeData.slice(0, 20).map((emp, i) => {
+                  const isClickable = !!(onSelectEmployee && emp.fiplCode);
+                  return (
+                    <tr
+                      key={emp.fiplCode || i}
+                      className={`border-t transition-colors ${isClickable ? "cursor-pointer hover:bg-indigo-50" : "hover:bg-muted/20"}`}
+                      onClick={() => {
+                        if (isClickable) onSelectEmployee(emp.fiplCode);
+                      }}
+                      onKeyDown={(e) => {
+                        if (
+                          isClickable &&
+                          (e.key === "Enter" || e.key === " ")
+                        ) {
+                          onSelectEmployee(emp.fiplCode);
+                        }
+                      }}
+                      tabIndex={isClickable ? 0 : undefined}
+                      data-ocid={`feedback.affected_employee.${i + 1}`}
+                    >
+                      <td className="px-4 py-3 font-medium">{emp.name}</td>
+                      <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
+                        {emp.fiplCode}
+                      </td>
+                      <td className="px-4 py-3 text-sm text-muted-foreground">
+                        {emp.region || "—"}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold border bg-indigo-50 text-indigo-700 border-indigo-200">
+                          {emp.count}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span
+                          className={`text-sm font-semibold ${emp.avgCes < 30 ? "text-red-600" : "text-emerald-600"}`}
+                        >
+                          {emp.avgCes.toFixed(1)}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        {isClickable && (
+                          <span className="text-xs text-indigo-600 font-medium">
+                            View Profile →
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {employeeData.length > 20 && (
+              <p className="text-xs text-muted-foreground text-center py-3">
+                Showing top 20 of {employeeData.length} employees
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Issue Insights Dashboard Top-level ───────────────────────────────────────
+
+function IssueInsightsDashboard({
+  records,
+  onSelectEmployee,
+}: {
+  records: DisplayRecord[];
+  onSelectEmployee?: (fiplCode: string) => void;
+}) {
+  const [insightSearch, setInsightSearch] = useState("");
+  const [insightRegion, setInsightRegion] = useState("all");
+  const [selectedIssue, setSelectedIssue] = useState<CategoryKey | null>(null);
+
+  const regionOptions = useMemo(
+    () => [...new Set(records.map((r) => r.region).filter(Boolean))].sort(),
+    [records],
+  );
+
+  const insightData = useMemo(
+    () =>
+      computeIssueInsights(
+        records,
+        insightRegion === "all" ? "" : insightRegion,
+        insightSearch,
+      ),
+    [records, insightRegion, insightSearch],
+  );
+
+  const totalRecords = records.length;
+  const negativeCount = records.filter((r) => r.cesScore < 30).length;
+  const mostCommon = insightData[0]?.label ?? "—";
+
+  // Export password gate
+  const { granted: exportGranted } = usePasswordGate("export");
+  const [pendingExportGate, setPendingExportGate] = useState(false);
+
+  const runInsightsExport = () => {
+    const filename = buildFilename(
+      "Issue_Insights",
+      insightRegion !== "all" ? { Region: insightRegion } : {},
+    );
+    exportToExcel({
+      filename,
+      filters: { Region: insightRegion !== "all" ? insightRegion : "All" },
+      sheets: [
+        {
+          name: "Issue Summary",
+          data: insightData.map((d) => ({
+            "Issue Type": d.label,
+            "Total Cases": d.count,
+            "% of All Issues": `${d.pctOfTotal}%`,
+            "Top Affected Regions": d.topRegions.join(", ") || "—",
+          })),
+          columns: [
+            { key: "Issue Type", header: "Issue Type", width: 28 },
+            { key: "Total Cases", header: "Total Cases", width: 14 },
+            { key: "% of All Issues", header: "% of All Issues", width: 16 },
+            {
+              key: "Top Affected Regions",
+              header: "Top Affected Regions",
+              width: 35,
+            },
+          ],
+        },
+      ],
+    });
+  };
+
+  if (selectedIssue) {
+    return (
+      <IssueDrillDown
+        categoryKey={selectedIssue}
+        allRecords={records}
+        onBack={() => setSelectedIssue(null)}
+        onSelectEmployee={onSelectEmployee}
+      />
+    );
+  }
+
+  return (
+    <div className="space-y-5" data-ocid="feedback.issue_insights">
+      {pendingExportGate && (
+        <PasswordGate
+          gateKey="export"
+          onUnlock={() => {
+            setPendingExportGate(false);
+            runInsightsExport();
+          }}
+          onCancel={() => setPendingExportGate(false)}
+        />
+      )}
+      {/* Section heading */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-bold tracking-tight">
+            📊 Issue Insights Dashboard
+          </h2>
+          <p className="text-sm text-muted-foreground mt-0.5">
+            Understand which issues are most common, where they happen, and how
+            often they repeat
+          </p>
+        </div>
+        <button
+          type="button"
+          data-ocid="feedback.issue_insights_export_button"
+          onClick={() => {
+            if (exportGranted) runInsightsExport();
+            else setPendingExportGate(true);
+          }}
+          className="inline-flex items-center gap-1.5 rounded-md border border-indigo-300 bg-background px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-600 hover:text-white hover:border-indigo-600 transition-colors shadow-sm shrink-0"
+        >
+          <Download className="w-3.5 h-3.5" />
+          Export Insights
+        </button>
+      </div>
+
+      {/* KPI summary chips */}
+      <div
+        className="flex flex-wrap gap-3"
+        data-ocid="feedback.issue_insights_kpis"
+      >
+        <div className="inline-flex items-center gap-2 rounded-full border bg-card px-4 py-2 shadow-sm">
+          <span className="text-xs text-muted-foreground font-medium">
+            Total Feedback Records:
+          </span>
+          <span className="text-sm font-bold text-foreground">
+            {totalRecords}
+          </span>
+        </div>
+        <div className="inline-flex items-center gap-2 rounded-full border bg-red-50 border-red-200 px-4 py-2 shadow-sm">
+          <span className="text-xs text-red-600 font-medium">
+            Negative CES (&lt;30):
+          </span>
+          <span className="text-sm font-bold text-red-700">
+            {negativeCount}
+          </span>
+        </div>
+        <div className="inline-flex items-center gap-2 rounded-full border bg-indigo-50 border-indigo-200 px-4 py-2 shadow-sm">
+          <span className="text-xs text-indigo-600 font-medium">
+            Most Common Issue:
+          </span>
+          <span className="text-sm font-bold text-indigo-700">
+            {mostCommon}
+          </span>
+        </div>
+      </div>
+
+      {/* Filters row */}
+      <div
+        className="flex flex-wrap gap-3 items-center"
+        data-ocid="feedback.issue_insights_filters"
+      >
+        <div className="relative flex-1 min-w-[200px] max-w-sm">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+          <Input
+            className="pl-9"
+            placeholder="Search issue types..."
+            value={insightSearch}
+            onChange={(e) => setInsightSearch(e.target.value)}
+            data-ocid="feedback.issue_insights_search"
+          />
+        </div>
+        <Select value={insightRegion} onValueChange={setInsightRegion}>
+          <SelectTrigger
+            className="w-44"
+            data-ocid="feedback.issue_insights_region_select"
+          >
+            <SelectValue placeholder="All Regions" />
+          </SelectTrigger>
+          <SelectContent className="max-h-60 overflow-y-auto">
+            <SelectItem value="all">All Regions</SelectItem>
+            {regionOptions.map((r) => (
+              <SelectItem key={r} value={r}>
+                {r}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+
+      {/* Issue cards grid */}
+      {insightData.length === 0 ? (
+        <div
+          className="flex flex-col items-center justify-center py-16 text-muted-foreground"
+          data-ocid="feedback.issue_insights_empty_state"
+        >
+          <p className="text-base font-medium">
+            No issue types match your filter
+          </p>
+          <p className="text-sm mt-1">
+            Try clearing the search or selecting a different region
+          </p>
+        </div>
+      ) : (
+        <div
+          className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4"
+          data-ocid="feedback.issue_insights_grid"
+        >
+          {insightData.map((d, idx) => (
+            <button
+              key={d.key}
+              type="button"
+              data-ocid={`feedback.issue_card.${idx + 1}`}
+              onClick={() => setSelectedIssue(d.key)}
+              className={`group rounded-xl border text-left p-5 shadow-sm hover:shadow-md transition-all hover:-translate-y-0.5 focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-primary ${d.bgLight} ${d.borderAccent}`}
+            >
+              {/* Header: label + count badge */}
+              <div className="flex items-start justify-between gap-2 mb-3">
+                <span
+                  className={`text-sm font-bold leading-snug ${d.textAccent}`}
+                >
+                  {d.label}
+                </span>
+                <span className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-bold border bg-card text-foreground border-border shrink-0">
+                  {d.count}
+                </span>
+              </div>
+
+              {/* Repeat rate */}
+              <p className="text-xs text-muted-foreground mb-3">
+                <span className={`font-semibold ${d.textAccent}`}>
+                  {d.pctOfTotal}%
+                </span>{" "}
+                of all issues
+              </p>
+
+              {/* Progress bar */}
+              <div className="h-1.5 rounded-full bg-muted/60 overflow-hidden mb-3">
+                <div
+                  className="h-full rounded-full transition-all duration-700"
+                  style={{ width: `${d.barWidth}%`, background: d.accent }}
+                />
+              </div>
+
+              {/* Top regions */}
+              {d.topRegions.length > 0 && (
+                <div className="flex flex-wrap gap-1 mb-3">
+                  {d.topRegions.map((reg) => (
+                    <span
+                      key={reg}
+                      className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border bg-card text-muted-foreground border-border"
+                    >
+                      {reg}
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              {/* CTA */}
+              <div
+                className={`text-xs font-semibold ${d.textAccent} group-hover:underline mt-1`}
+              >
+                View Details →
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────────
+
+const EMPTY_FORM = {
+  fiplCode: "",
+  customerName: "",
+  contact: "",
+  brand:
+    Variant_tineco_ecovacs_coway_kuvings_instant.ecovacs as Variant_tineco_ecovacs_coway_kuvings_instant,
+  product: "",
+  cesScore: 35,
+  remark: "",
+  callDate: "",
+  agent: "",
+};
+
+function brandEnumToStr(
+  b: Variant_tineco_ecovacs_coway_kuvings_instant,
+): string {
+  const map: Record<string, string> = {
+    [Variant_tineco_ecovacs_coway_kuvings_instant.ecovacs]: "Ecovacs",
+    [Variant_tineco_ecovacs_coway_kuvings_instant.kuvings]: "Kuvings",
+    [Variant_tineco_ecovacs_coway_kuvings_instant.coway]: "Coway",
+    [Variant_tineco_ecovacs_coway_kuvings_instant.tineco]: "Tineco",
+    [Variant_tineco_ecovacs_coway_kuvings_instant.instant]: "Instant",
+  };
+  return map[String(b)] ?? String(b);
+}
 
 export default function Feedback({
   onSelectEmployee,
@@ -533,24 +1808,17 @@ export default function Feedback({
   onSelectEmployee?: (fiplCode: string) => void;
 }) {
   const { labels } = useLabels();
-  // Google Sheet live data
   const { data: sheetRecords = [], isLoading: sheetLoading } =
     useGoogleSheetCallRecords();
-
-  // Employee data for region lookup
   const { data: liveEmployees = [] } = useEmployees();
-
-  // Backend manual records
   const { data: employees = [] } = useAllEmployees();
   const employeeCodes = employees.map((e) => e.fiplCode);
   const { data: backendFeedback = [], isLoading: backendLoading } =
     useAllFeedback(employeeCodes);
   const addFeedback = useAddFeedback();
   const batchUpload = useBatchFeedbackUpload();
-
   const isLoading = sheetLoading || backendLoading;
 
-  // ── Region drilldown state ──
   const [selectedRegion, setSelectedRegion] = useState<string | null>(null);
 
   const nameMap = useMemo(
@@ -558,18 +1826,15 @@ export default function Feedback({
     [employees],
   );
 
-  // Build FIPL → region map from live employee data (normalized keys)
   const regionMap = useMemo(() => {
     const map: Record<string, string> = {};
     for (const emp of liveEmployees) {
-      if (emp.fiplCode && emp.region) {
+      if (emp.fiplCode && emp.region)
         map[normalizeKey(emp.fiplCode)] = emp.region;
-      }
     }
     return map;
   }, [liveEmployees]);
 
-  // Convert Google Sheet records to DisplayRecord
   const sheetDisplayRecords: DisplayRecord[] = useMemo(
     () =>
       sheetRecords.map((r) => ({
@@ -581,6 +1846,7 @@ export default function Feedback({
         product: r.product,
         cesScore: r.cesScore,
         remark: r.remark,
+        dateOfVisit: r.dateOfVisit ?? "",
         callDate: r.callDate,
         agent: r.agent,
         source: "sheet" as const,
@@ -591,7 +1857,6 @@ export default function Feedback({
     [sheetRecords, regionMap],
   );
 
-  // Convert backend FeedbackEntry to DisplayRecord
   const backendDisplayRecords: DisplayRecord[] = useMemo(
     () =>
       backendFeedback.map((f) => ({
@@ -604,6 +1869,7 @@ export default function Feedback({
         product: f.product,
         cesScore: f.cesScore,
         remark: f.remark,
+        dateOfVisit: f.dateOfVisit ?? "",
         callDate: f.callDate,
         agent: f.agent,
         source: "manual" as const,
@@ -614,13 +1880,11 @@ export default function Feedback({
     [backendFeedback, nameMap, regionMap],
   );
 
-  // Merge: Google Sheet records first, then any manually-added backend records
   const allRecords: DisplayRecord[] = useMemo(
     () => [...sheetDisplayRecords, ...backendDisplayRecords],
     [sheetDisplayRecords, backendDisplayRecords],
   );
 
-  const [view, setView] = useState<ViewMode>("table");
   const [search, setSearch] = useState("");
   const [brandFilter, setBrandFilter] = useState("all");
   const [cesFilter, setCesFilter] = useState<"all" | "positive" | "negative">(
@@ -636,14 +1900,14 @@ export default function Feedback({
   const [form, setForm] = useState({ ...EMPTY_FORM });
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Password gate for write actions
   const { granted: writeGranted, grant: grantWrite } =
     usePasswordGate("feedback-write");
+  const { granted: exportGranted } = usePasswordGate("export");
   const [pendingAction, setPendingAction] = useState<
     "upload" | "addRecord" | null
   >(null);
+  const [pendingFeedbackExport, setPendingFeedbackExport] = useState(false);
 
-  // Reset page when any filter changes
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — reset page on any filter change
   useEffect(() => {
     setPage(0);
@@ -656,20 +1920,17 @@ export default function Feedback({
     activeCategoryFilter,
   ]);
 
-  // Dynamic region options from data
   const regionOptions = useMemo(
     () => [...new Set(allRecords.map((r) => r.region).filter(Boolean))].sort(),
     [allRecords],
   );
 
-  // Dynamic issue type options: known types + any extras found in data
   const issueTypeOptions = useMemo(() => {
     const fromData = allRecords.map((r) => r.typeOfIssue).filter(Boolean);
     const combined = new Set([...KNOWN_ISSUE_TYPES, ...fromData]);
     return [...combined];
   }, [allRecords]);
 
-  // Combined filter — ALL conditions ANDed on actual dataset
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
     return allRecords.filter((r) => {
@@ -716,7 +1977,6 @@ export default function Feedback({
   const pages = Math.ceil(filtered.length / PAGE_SIZE);
   const paginated = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
-  // Category counts from ALL records (unfiltered, for the sidebar chips)
   const categoryCounts = useMemo(() => {
     const counts: Record<CategoryKey, number> = {
       "FSE Issue": 0,
@@ -724,9 +1984,6 @@ export default function Feedback({
       "Brand Issue": 0,
       "Technical and Product Issue": 0,
       "After-Sales Issue": 0,
-      Satisfied: 0,
-      FeedbackFormSent: 0,
-      "Wow Factor": 0,
     };
     for (const r of allRecords) {
       for (const cat of classifyIssue(r.typeOfIssue)) {
@@ -783,6 +2040,7 @@ export default function Feedback({
     reader.onload = async (evt) => {
       try {
         const data = evt.target?.result;
+        if (data == null) return;
         const workbook = XLSX.read(data, { type: "binary" });
         const sheet = workbook.Sheets[workbook.SheetNames[0]];
         const rows: Record<string, unknown>[] = XLSX.utils.sheet_to_json(
@@ -823,9 +2081,7 @@ export default function Feedback({
 
         const result = await batchUpload.mutateAsync(records);
         toast.success(
-          `${result.successCount} records uploaded successfully${
-            result.failCount > 0n ? `, ${result.failCount} failed` : ""
-          }`,
+          `${result.successCount} records uploaded successfully${result.failCount > 0n ? `, ${result.failCount} failed` : ""}`,
         );
       } catch {
         toast.error("Failed to parse or upload file");
@@ -850,7 +2106,6 @@ export default function Feedback({
         />
       )}
 
-      {/* Normal Feedback content (hidden while drilldown is open) */}
       {!selectedRegion && (
         <>
           {/* Header */}
@@ -862,50 +2117,21 @@ export default function Feedback({
               <p className="text-muted-foreground text-sm mt-0.5">
                 {allRecords.length} records&nbsp;&middot;&nbsp;Avg CES:{" "}
                 <span
-                  className={`font-semibold ${
-                    avgCes < 30 ? "text-red-600" : "text-emerald-600"
-                  }`}
+                  className={`font-semibold ${avgCes < 30 ? "text-red-600" : "text-emerald-600"}`}
                 >
                   {avgCes.toFixed(1)}/40
                 </span>
               </p>
             </div>
-
-            {/* View Toggle */}
+            {/* View label — single tab now */}
             <div
               className="inline-flex items-center rounded-lg border bg-muted p-1 gap-1"
               role="tablist"
             >
-              <button
-                type="button"
-                role="tab"
-                aria-selected={view === "table"}
-                data-ocid="feedback.tab"
-                onClick={() => setView("table")}
-                className={`inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-                  view === "table"
-                    ? "bg-background text-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
+              <div className="inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium bg-background text-foreground shadow-sm">
                 <TableIcon className="w-4 h-4" />
                 {labels.callingRecordsTab}
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={view === "masonry"}
-                data-ocid="feedback.tab"
-                onClick={() => setView("masonry")}
-                className={`inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
-                  view === "masonry"
-                    ? "bg-background text-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                <Grid2X2 className="w-4 h-4" />
-                {labels.customerReviewsTab}
-              </button>
+              </div>
             </div>
           </div>
 
@@ -966,7 +2192,6 @@ export default function Feedback({
                         {count}
                       </Badge>
                     </span>
-                    {/* Progress bar */}
                     <span className="block h-1 rounded-full bg-current/20 overflow-hidden">
                       <span
                         className="block h-full rounded-full bg-current/60 transition-all duration-500"
@@ -979,668 +2204,746 @@ export default function Feedback({
             </div>
           </div>
 
-          {/* ─── View: Calling Records ─────────────────────────────────────────────── */}
-          {view === "table" && (
-            <div className="space-y-4">
-              {/* Toolbar — row 1: search */}
-              <div className="flex flex-col gap-3">
-                <div className="relative flex-1">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-                  <Input
-                    data-ocid="feedback.search_input"
-                    className="pl-9"
-                    placeholder="Search by employee, FIPL, customer, brand, product, agent..."
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                  />
-                </div>
-
-                {/* Toolbar — row 2: filters + actions */}
-                <div className="flex flex-wrap gap-2 items-center">
-                  {/* Brand filter */}
-                  <Select
-                    value={brandFilter}
-                    onValueChange={(v) => setBrandFilter(v)}
-                  >
-                    <SelectTrigger className="w-40" data-ocid="feedback.select">
-                      <SelectValue placeholder="All Brands" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All Brands</SelectItem>
-                      {BRANDS.map((b) => (
-                        <SelectItem key={b} value={b}>
-                          {b}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-
-                  {/* CES filter */}
-                  <Select
-                    value={cesFilter}
-                    onValueChange={(v) =>
-                      setCesFilter(v as "all" | "positive" | "negative")
-                    }
-                  >
-                    <SelectTrigger className="w-44" data-ocid="feedback.select">
-                      <SelectValue placeholder="All Feedbacks" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All Feedbacks</SelectItem>
-                      <SelectItem value="positive">
-                        Positive (CES &gt;30)
-                      </SelectItem>
-                      <SelectItem value="negative">
-                        Negative (CES ≤30)
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-
-                  {/* Region filter */}
-                  <Select
-                    value={regionFilter}
-                    onValueChange={(v) => setRegionFilter(v)}
-                  >
-                    <SelectTrigger className="w-40" data-ocid="feedback.select">
-                      <SelectValue placeholder="All Regions" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All Regions</SelectItem>
-                      {regionOptions.map((r) => (
-                        <SelectItem key={r} value={r}>
-                          {r}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-
-                  {/* Type of Issue filter */}
-                  <Select
-                    value={issueTypeFilter}
-                    onValueChange={(v) => setIssueTypeFilter(v)}
-                  >
-                    <SelectTrigger className="w-52" data-ocid="feedback.select">
-                      <SelectValue placeholder="All Issue Types" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All Issue Types</SelectItem>
-                      {issueTypeOptions.map((t) => (
-                        <SelectItem key={t} value={t}>
-                          {t}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-
-                  <div className="flex-1" />
-
-                  {/* Upload Excel */}
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".xlsx,.csv"
-                    className="hidden"
-                    onChange={handleFileUpload}
-                  />
-                  <Button
-                    variant="outline"
-                    data-ocid="feedback.upload_button"
-                    onClick={() => {
-                      if (writeGranted) {
-                        fileInputRef.current?.click();
-                      } else {
-                        setPendingAction("upload");
-                      }
-                    }}
-                    disabled={batchUpload.isPending}
-                  >
-                    {batchUpload.isPending ? (
-                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                    ) : (
-                      <Upload className="w-4 h-4 mr-2" />
-                    )}
-                    Upload Excel
-                  </Button>
-
-                  {/* Add Record Button */}
-                  <Button
-                    data-ocid="feedback.open_modal_button"
-                    onClick={() => {
-                      if (writeGranted) {
-                        setDialogOpen(true);
-                      } else {
-                        setPendingAction("addRecord");
-                      }
-                    }}
-                  >
-                    <Plus className="w-4 h-4 mr-2" />
-                    Add Record
-                  </Button>
-                </div>
+          {/* ─── Call Records View ──────────────────────────────────────────────── */}
+          <div className="space-y-4">
+            {/* Toolbar */}
+            <div className="flex flex-col gap-3">
+              <div className="relative flex-1">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+                <Input
+                  data-ocid="feedback.search_input"
+                  className="pl-9"
+                  placeholder="Search by employee, FIPL, customer, brand, product, agent..."
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                />
               </div>
+              <div className="flex flex-wrap gap-2 items-center">
+                <Select value={brandFilter} onValueChange={setBrandFilter}>
+                  <SelectTrigger className="w-40" data-ocid="feedback.select">
+                    <SelectValue placeholder="All Brands" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Brands</SelectItem>
+                    {BRANDS.map((b) => (
+                      <SelectItem key={b} value={b}>
+                        {b}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
 
-              {/* Add Record Dialog (controlled) */}
-              <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-                <DialogContent
-                  className="max-w-lg max-h-[90vh] overflow-y-auto"
-                  data-ocid="feedback.dialog"
+                <Select
+                  value={cesFilter}
+                  onValueChange={(v) =>
+                    setCesFilter(v as "all" | "positive" | "negative")
+                  }
                 >
-                  <DialogHeader>
-                    <DialogTitle>Add Calling Record</DialogTitle>
-                  </DialogHeader>
-                  <div className="grid gap-4 py-4">
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-1.5">
-                        <Label>FIPL Code</Label>
-                        <Input
-                          data-ocid="feedback.input"
-                          value={form.fiplCode}
-                          onChange={(e) =>
-                            handleFormChange("fiplCode", e.target.value)
-                          }
-                          placeholder="e.g. FIPL-001"
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <Label>Customer Name</Label>
-                        <Input
-                          value={form.customerName}
-                          onChange={(e) =>
-                            handleFormChange("customerName", e.target.value)
-                          }
-                          placeholder="Full name"
-                        />
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-1.5">
-                        <Label>Contact</Label>
-                        <Input
-                          value={form.contact}
-                          onChange={(e) =>
-                            handleFormChange("contact", e.target.value)
-                          }
-                          placeholder="Phone / email"
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <Label>Brand</Label>
-                        <Select
-                          value={form.brand}
-                          onValueChange={(v) =>
-                            handleFormChange(
-                              "brand",
-                              v as Variant_tineco_ecovacs_coway_kuvings_instant,
-                            )
-                          }
-                        >
-                          <SelectTrigger>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {BRANDS.map((b) => (
-                              <SelectItem
-                                key={b.toLowerCase()}
-                                value={b.toLowerCase()}
-                              >
-                                {b}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-1.5">
-                        <Label>Product</Label>
-                        <Input
-                          value={form.product}
-                          onChange={(e) =>
-                            handleFormChange("product", e.target.value)
-                          }
-                          placeholder="Product name"
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <Label>CES Score (0–40)</Label>
-                        <Input
-                          type="number"
-                          min={0}
-                          max={40}
-                          value={form.cesScore}
-                          onChange={(e) =>
-                            handleFormChange("cesScore", Number(e.target.value))
-                          }
-                        />
-                      </div>
-                    </div>
+                  <SelectTrigger className="w-44" data-ocid="feedback.select">
+                    <SelectValue placeholder="All Feedbacks" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Feedbacks</SelectItem>
+                    <SelectItem value="positive">Positive (CES ≥30)</SelectItem>
+                    <SelectItem value="negative">
+                      Negative (CES &lt;30)
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+
+                <Select value={regionFilter} onValueChange={setRegionFilter}>
+                  <SelectTrigger className="w-40" data-ocid="feedback.select">
+                    <SelectValue placeholder="All Regions" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Regions</SelectItem>
+                    {regionOptions.map((r) => (
+                      <SelectItem key={r} value={r}>
+                        {r}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+
+                <Select
+                  value={issueTypeFilter}
+                  onValueChange={setIssueTypeFilter}
+                >
+                  <SelectTrigger className="w-52" data-ocid="feedback.select">
+                    <SelectValue placeholder="All Issue Types" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All Issue Types</SelectItem>
+                    {issueTypeOptions.map((t) => (
+                      <SelectItem key={t} value={t}>
+                        {t}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+
+                <div className="flex-1" />
+
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".xlsx,.csv"
+                  className="hidden"
+                  onChange={handleFileUpload}
+                />
+                <Button
+                  variant="outline"
+                  data-ocid="feedback.upload_button"
+                  onClick={() => {
+                    if (writeGranted) {
+                      fileInputRef.current?.click();
+                    } else {
+                      setPendingAction("upload");
+                    }
+                  }}
+                  disabled={batchUpload.isPending}
+                >
+                  {batchUpload.isPending ? (
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  ) : (
+                    <Upload className="w-4 h-4 mr-2" />
+                  )}
+                  Upload Excel
+                </Button>
+
+                <Button
+                  data-ocid="feedback.open_modal_button"
+                  onClick={() => {
+                    if (writeGranted) {
+                      setDialogOpen(true);
+                    } else {
+                      setPendingAction("addRecord");
+                    }
+                  }}
+                >
+                  <Plus className="w-4 h-4 mr-2" />
+                  Add Record
+                </Button>
+              </div>
+            </div>
+
+            {/* Add Record Dialog */}
+            <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+              <DialogContent
+                className="max-w-lg max-h-[90vh] overflow-y-auto"
+                data-ocid="feedback.dialog"
+              >
+                <DialogHeader>
+                  <DialogTitle>Add Calling Record</DialogTitle>
+                </DialogHeader>
+                <div className="grid gap-4 py-4">
+                  <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-1.5">
-                      <Label>Remark</Label>
-                      <Textarea
-                        data-ocid="feedback.textarea"
-                        value={form.remark}
+                      <Label>FIPL Code</Label>
+                      <Input
+                        data-ocid="feedback.input"
+                        value={form.fiplCode}
                         onChange={(e) =>
-                          handleFormChange("remark", e.target.value)
+                          handleFormChange("fiplCode", e.target.value)
                         }
-                        rows={3}
-                        placeholder="Notes about the call..."
+                        placeholder="e.g. FIPL-001"
                       />
                     </div>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-1.5">
-                        <Label>Date of Call</Label>
-                        <Input
-                          type="date"
-                          value={form.callDate}
-                          onChange={(e) =>
-                            handleFormChange("callDate", e.target.value)
-                          }
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <Label>Agent</Label>
-                        <Input
-                          value={form.agent}
-                          onChange={(e) =>
-                            handleFormChange("agent", e.target.value)
-                          }
-                          placeholder="Agent name"
-                        />
-                      </div>
+                    <div className="space-y-1.5">
+                      <Label>Customer Name</Label>
+                      <Input
+                        value={form.customerName}
+                        onChange={(e) =>
+                          handleFormChange("customerName", e.target.value)
+                        }
+                        placeholder="Full name"
+                      />
                     </div>
                   </div>
-                  <DialogFooter>
-                    <Button
-                      variant="outline"
-                      data-ocid="feedback.cancel_button"
-                      onClick={() => setDialogOpen(false)}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      data-ocid="feedback.submit_button"
-                      onClick={handleAddRecord}
-                      disabled={addFeedback.isPending}
-                    >
-                      {addFeedback.isPending ? (
-                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                      ) : null}
-                      Save Record
-                    </Button>
-                  </DialogFooter>
-                </DialogContent>
-              </Dialog>
-
-              {/* Remark Preview Dialog */}
-              <Dialog
-                open={remarkRecord !== null}
-                onOpenChange={(open) => {
-                  if (!open) setRemarkRecord(null);
-                }}
-              >
-                <DialogContent className="max-w-md">
-                  <DialogHeader>
-                    <DialogTitle>Feedback Details</DialogTitle>
-                  </DialogHeader>
-                  <div className="space-y-3 text-sm">
-                    <div>
-                      <span className="font-semibold">FSE / Employee: </span>
-                      {remarkRecord?.fseName || remarkRecord?.fiplCode || "—"}
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <Label>Contact</Label>
+                      <Input
+                        value={form.contact}
+                        onChange={(e) =>
+                          handleFormChange("contact", e.target.value)
+                        }
+                        placeholder="Phone / email"
+                      />
                     </div>
-                    <div>
-                      <span className="font-semibold">FIPL Code: </span>
-                      {remarkRecord?.fiplCode}
-                    </div>
-                    {remarkRecord?.region && (
-                      <div>
-                        <span className="font-semibold">Region: </span>
-                        {remarkRecord.region}
-                      </div>
-                    )}
-                    <div>
-                      <span className="font-semibold">Customer: </span>
-                      {remarkRecord?.customerName}
-                    </div>
-                    <div>
-                      <span className="font-semibold">Brand: </span>
-                      {remarkRecord?.brand}
-                    </div>
-                    <div>
-                      <span className="font-semibold">Product: </span>
-                      {remarkRecord?.product}
-                    </div>
-                    <div>
-                      <span className="font-semibold">CES Score: </span>
-                      <span
-                        className={
-                          remarkRecord && remarkRecord.cesScore <= 30
-                            ? "text-red-600 font-semibold"
-                            : "text-green-600 font-semibold"
+                    <div className="space-y-1.5">
+                      <Label>Brand</Label>
+                      <Select
+                        value={form.brand}
+                        onValueChange={(v) =>
+                          handleFormChange(
+                            "brand",
+                            v as Variant_tineco_ecovacs_coway_kuvings_instant,
+                          )
                         }
                       >
-                        {remarkRecord?.cesScore} (
-                        {remarkRecord && remarkRecord.cesScore > 30
-                          ? "Positive"
-                          : "Negative"}
-                        )
-                      </span>
-                    </div>
-                    <div>
-                      <span className="font-semibold">Date: </span>
-                      {formatDisplayDate(remarkRecord?.callDate)}
-                    </div>
-                    <div>
-                      <span className="font-semibold">Agent: </span>
-                      {remarkRecord?.agent || "—"}
-                    </div>
-                    <div>
-                      <span className="font-semibold">Type of Issue: </span>
-                      {remarkRecord?.typeOfIssue || "—"}
-                    </div>
-                    <div>
-                      <span className="font-semibold">Resolution: </span>
-                      {remarkRecord?.resolution || "—"}
-                    </div>
-                    <div className="border-t pt-3">
-                      <span className="font-semibold block mb-1">
-                        Full Remark:
-                      </span>
-                      <p className="text-muted-foreground leading-relaxed">
-                        {remarkRecord?.remark || "No remark"}
-                      </p>
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {BRANDS.map((b) => (
+                            <SelectItem
+                              key={b.toLowerCase()}
+                              value={b.toLowerCase()}
+                            >
+                              {b}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </div>
                   </div>
-                </DialogContent>
-              </Dialog>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <Label>Product</Label>
+                      <Input
+                        value={form.product}
+                        onChange={(e) =>
+                          handleFormChange("product", e.target.value)
+                        }
+                        placeholder="Product name"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>CES Score (0–40)</Label>
+                      <Input
+                        type="number"
+                        min={0}
+                        max={40}
+                        value={form.cesScore}
+                        onChange={(e) =>
+                          handleFormChange("cesScore", Number(e.target.value))
+                        }
+                      />
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Remark</Label>
+                    <Textarea
+                      data-ocid="feedback.textarea"
+                      value={form.remark}
+                      onChange={(e) =>
+                        handleFormChange("remark", e.target.value)
+                      }
+                      rows={3}
+                      placeholder="Notes about the call..."
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <Label>Date of Call</Label>
+                      <Input
+                        type="date"
+                        value={form.callDate}
+                        onChange={(e) =>
+                          handleFormChange("callDate", e.target.value)
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Agent</Label>
+                      <Input
+                        value={form.agent}
+                        onChange={(e) =>
+                          handleFormChange("agent", e.target.value)
+                        }
+                        placeholder="Agent name"
+                      />
+                    </div>
+                  </div>
+                </div>
+                <DialogFooter>
+                  <Button
+                    variant="outline"
+                    data-ocid="feedback.cancel_button"
+                    onClick={() => setDialogOpen(false)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    data-ocid="feedback.submit_button"
+                    onClick={handleAddRecord}
+                    disabled={addFeedback.isPending}
+                  >
+                    {addFeedback.isPending ? (
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    ) : null}
+                    Save Record
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
 
-              {/* Summary bar */}
-              <div className="flex items-center gap-4 text-sm text-muted-foreground">
-                <span>{filtered.length} records</span>
-                {filtered.length > 0 && (
-                  <span>
-                    Avg CES:{" "}
+            {/* Remark Preview Dialog */}
+            <Dialog
+              open={remarkRecord !== null}
+              onOpenChange={(open) => {
+                if (!open) setRemarkRecord(null);
+              }}
+            >
+              <DialogContent className="max-w-md">
+                <DialogHeader>
+                  <DialogTitle>Feedback Details</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-3 text-sm">
+                  <div>
+                    <span className="font-semibold">FSE / Employee: </span>
+                    {remarkRecord?.fseName || remarkRecord?.fiplCode || "—"}
+                  </div>
+                  <div>
+                    <span className="font-semibold">FIPL Code: </span>
+                    {remarkRecord?.fiplCode}
+                  </div>
+                  {remarkRecord?.region && (
+                    <div>
+                      <span className="font-semibold">Region: </span>
+                      {remarkRecord.region}
+                    </div>
+                  )}
+                  <div>
+                    <span className="font-semibold">Customer: </span>
+                    {remarkRecord?.customerName}
+                  </div>
+                  <div>
+                    <span className="font-semibold">Brand: </span>
+                    {remarkRecord?.brand}
+                  </div>
+                  <div>
+                    <span className="font-semibold">Product: </span>
+                    {remarkRecord?.product}
+                  </div>
+                  <div>
+                    <span className="font-semibold">CES Score: </span>
                     <span
-                      className={`font-medium ${
-                        filtered.reduce((s, f) => s + f.cesScore, 0) /
-                          filtered.length <
-                        30
-                          ? "text-red-600"
-                          : "text-emerald-600"
-                      }`}
+                      className={
+                        remarkRecord && remarkRecord.cesScore < 30
+                          ? "text-red-600 font-semibold"
+                          : "text-green-600 font-semibold"
+                      }
                     >
-                      {(
-                        filtered.reduce((s, f) => s + f.cesScore, 0) /
-                        filtered.length
-                      ).toFixed(1)}
-                      /40
+                      {remarkRecord?.cesScore} (
+                      {remarkRecord && remarkRecord.cesScore >= 30
+                        ? "Positive"
+                        : "Negative"}
+                      )
                     </span>
-                  </span>
-                )}
-              </div>
-
-              {/* Table */}
-              <div
-                className="rounded-xl border overflow-x-auto"
-                data-ocid="feedback.table"
-              >
-                <table className="w-full text-sm">
-                  <thead className="bg-muted/50">
-                    <tr>
-                      {[
-                        "Date of Call",
-                        "FSE",
-                        "Customer Name",
-                        "Region",
-                        "Brand",
-                        "Product",
-                        "CES Score",
-                        "Type of Issue",
-                        "Remark",
-                        "Agent",
-                      ].map((h) => (
-                        <th
-                          key={h}
-                          className="text-left px-4 py-3 font-medium text-muted-foreground whitespace-nowrap text-xs uppercase tracking-wide"
-                        >
-                          {h}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {isLoading ? (
-                      <tr>
-                        <td
-                          colSpan={10}
-                          className="px-4 py-10 text-center text-muted-foreground"
-                          data-ocid="feedback.loading_state"
-                        >
-                          <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2" />
-                          Loading records from Google Sheets...
-                        </td>
-                      </tr>
-                    ) : paginated.length === 0 ? (
-                      <tr>
-                        <td
-                          colSpan={10}
-                          className="px-4 py-10 text-center text-muted-foreground"
-                          data-ocid="feedback.empty_state"
-                        >
-                          No records found
-                        </td>
-                      </tr>
-                    ) : (
-                      paginated.map((f, idx) => (
-                        <tr
-                          key={f.id}
-                          data-ocid={`feedback.item.${idx + 1}`}
-                          className={`border-t transition-colors hover:bg-muted/30 ${
-                            f.cesScore < 30 ? "bg-red-50/40" : ""
-                          }`}
-                        >
-                          <td className="px-4 py-3 whitespace-nowrap text-muted-foreground text-xs">
-                            {formatDisplayDate(f.callDate)}
-                          </td>
-                          <td className="px-4 py-3">
-                            <div className="font-medium text-sm">
-                              {f.fseName || nameMap[f.fiplCode] || "—"}
-                            </div>
-                            <div className="text-xs text-muted-foreground font-mono">
-                              {f.fiplCode}
-                            </div>
-                          </td>
-                          <td className="px-4 py-3 font-medium">
-                            {f.customerName}
-                          </td>
-                          <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">
-                            {f.region || "—"}
-                          </td>
-                          <td className="px-4 py-3">
-                            <span
-                              className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium border ${brandColorClass(
-                                f.brand,
-                              )}`}
-                            >
-                              {f.brand}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3 text-sm">{f.product}</td>
-                          <td className="px-4 py-3">
-                            <CesBadge score={f.cesScore} />
-                          </td>
-                          <td className="px-4 py-3 text-sm">
-                            {f.typeOfIssue ? (
-                              <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium border bg-violet-50 text-violet-700 border-violet-200 whitespace-nowrap">
-                                {f.typeOfIssue}
-                              </span>
-                            ) : (
-                              <span className="text-muted-foreground">—</span>
-                            )}
-                          </td>
-                          <td className="px-4 py-3 max-w-[200px] text-sm text-muted-foreground">
-                            <button
-                              type="button"
-                              className="line-clamp-2 text-left cursor-pointer hover:text-blue-600 hover:underline bg-transparent border-none p-0"
-                              title="Click to view full details"
-                              onClick={() => setRemarkRecord(f)}
-                            >
-                              {f.remark || "—"}
-                            </button>
-                          </td>
-                          <td className="px-4 py-3 text-sm">{f.agent}</td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-
-              {/* Pagination */}
-              {pages > 1 && (
-                <div className="flex items-center justify-between">
-                  <p className="text-sm text-muted-foreground">
-                    Page {page + 1} of {pages}
-                  </p>
-                  <div className="flex gap-2">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      data-ocid="feedback.pagination_prev"
-                      disabled={page === 0}
-                      onClick={() => setPage(page - 1)}
-                    >
-                      Prev
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      data-ocid="feedback.pagination_next"
-                      disabled={page >= pages - 1}
-                      onClick={() => setPage(page + 1)}
-                    >
-                      Next
-                    </Button>
+                  </div>
+                  <div>
+                    <span className="font-semibold">Date of Visit: </span>
+                    {formatDisplayDate(remarkRecord?.dateOfVisit)}
+                  </div>
+                  <div>
+                    <span className="font-semibold">Agent: </span>
+                    {remarkRecord?.agent || "—"}
+                  </div>
+                  <div>
+                    <span className="font-semibold">Type of Issue: </span>
+                    {remarkRecord?.typeOfIssue || "—"}
+                  </div>
+                  <div>
+                    <span className="font-semibold">Resolution: </span>
+                    {remarkRecord?.resolution || "—"}
+                  </div>
+                  <div className="border-t pt-3">
+                    <span className="font-semibold block mb-1">
+                      Full Remark:
+                    </span>
+                    <p className="text-muted-foreground leading-relaxed">
+                      {remarkRecord?.remark || "No remark"}
+                    </p>
                   </div>
                 </div>
+              </DialogContent>
+            </Dialog>
+
+            {/* Summary bar */}
+            <div className="flex items-center gap-4 text-sm text-muted-foreground">
+              <span>{filtered.length} records</span>
+              {filtered.length > 0 && (
+                <span>
+                  Avg CES:{" "}
+                  <span
+                    className={`font-medium ${filtered.reduce((s, f) => s + f.cesScore, 0) / filtered.length < 30 ? "text-red-600" : "text-emerald-600"}`}
+                  >
+                    {(
+                      filtered.reduce((s, f) => s + f.cesScore, 0) /
+                      filtered.length
+                    ).toFixed(1)}
+                    /40
+                  </span>
+                </span>
               )}
+              <div className="flex-1" />
+              {pendingFeedbackExport && (
+                <PasswordGate
+                  gateKey="export"
+                  onUnlock={() => {
+                    setPendingFeedbackExport(false);
+                    const filename = buildFilename("Feedback", {
+                      CES: cesFilter,
+                      Region: regionFilter,
+                      IssueType: issueTypeFilter,
+                      Search: search,
+                    });
+                    const filterLabels: Record<string, string> = {
+                      Search: search || "All",
+                      CES:
+                        cesFilter === "positive"
+                          ? "Positive (≥30)"
+                          : cesFilter === "negative"
+                            ? "Negative (<30)"
+                            : "All",
+                      Region: regionFilter !== "all" ? regionFilter : "All",
+                      "Issue Type":
+                        issueTypeFilter !== "all" ? issueTypeFilter : "All",
+                    };
+                    exportToExcel({
+                      filename,
+                      filters: filterLabels,
+                      sheets: [
+                        {
+                          name: "Feedback Records",
+                          data: filtered.map((r) => ({
+                            "Employee Name": r.fseName || r.fiplCode || "—",
+                            "FIPL Code": r.fiplCode,
+                            "Customer Name": r.customerName,
+                            Brand: r.brand,
+                            Product: r.product,
+                            "CES Score": r.cesScore,
+                            "Date of Visit": formatDisplayDate(r.dateOfVisit),
+                            Agent: r.agent || "—",
+                            Region: r.region || "—",
+                            "Type of Issue": r.typeOfIssue || "—",
+                            Resolution: r.resolution || "—",
+                            Remarks: r.remark || "—",
+                          })),
+                          columns: [
+                            {
+                              key: "Employee Name",
+                              header: "Employee Name",
+                              width: 22,
+                            },
+                            {
+                              key: "FIPL Code",
+                              header: "FIPL Code",
+                              width: 14,
+                            },
+                            {
+                              key: "Customer Name",
+                              header: "Customer Name",
+                              width: 22,
+                            },
+                            { key: "Brand", header: "Brand", width: 14 },
+                            { key: "Product", header: "Product", width: 22 },
+                            {
+                              key: "CES Score",
+                              header: "CES Score",
+                              width: 12,
+                            },
+                            {
+                              key: "Date of Visit",
+                              header: "Date of Visit",
+                              width: 14,
+                            },
+                            { key: "Agent", header: "Agent", width: 18 },
+                            { key: "Region", header: "Region", width: 16 },
+                            {
+                              key: "Type of Issue",
+                              header: "Type of Issue",
+                              width: 28,
+                            },
+                            {
+                              key: "Resolution",
+                              header: "Resolution",
+                              width: 28,
+                            },
+                            { key: "Remarks", header: "Remarks", width: 45 },
+                          ],
+                        },
+                      ],
+                    });
+                  }}
+                  onCancel={() => setPendingFeedbackExport(false)}
+                />
+              )}
+              <button
+                type="button"
+                data-ocid="feedback.export_button"
+                onClick={() => {
+                  if (exportGranted) {
+                    const filename = buildFilename("Feedback", {
+                      CES: cesFilter,
+                      Region: regionFilter,
+                      IssueType: issueTypeFilter,
+                      Search: search,
+                    });
+                    const filterLabels: Record<string, string> = {
+                      Search: search || "All",
+                      CES:
+                        cesFilter === "positive"
+                          ? "Positive (≥30)"
+                          : cesFilter === "negative"
+                            ? "Negative (<30)"
+                            : "All",
+                      Region: regionFilter !== "all" ? regionFilter : "All",
+                      "Issue Type":
+                        issueTypeFilter !== "all" ? issueTypeFilter : "All",
+                    };
+                    exportToExcel({
+                      filename,
+                      filters: filterLabels,
+                      sheets: [
+                        {
+                          name: "Feedback Records",
+                          data: filtered.map((r) => ({
+                            "Employee Name": r.fseName || r.fiplCode || "—",
+                            "FIPL Code": r.fiplCode,
+                            "Customer Name": r.customerName,
+                            Brand: r.brand,
+                            Product: r.product,
+                            "CES Score": r.cesScore,
+                            "Date of Visit": formatDisplayDate(r.dateOfVisit),
+                            Agent: r.agent || "—",
+                            Region: r.region || "—",
+                            "Type of Issue": r.typeOfIssue || "—",
+                            Resolution: r.resolution || "—",
+                            Remarks: r.remark || "—",
+                          })),
+                          columns: [
+                            {
+                              key: "Employee Name",
+                              header: "Employee Name",
+                              width: 22,
+                            },
+                            {
+                              key: "FIPL Code",
+                              header: "FIPL Code",
+                              width: 14,
+                            },
+                            {
+                              key: "Customer Name",
+                              header: "Customer Name",
+                              width: 22,
+                            },
+                            { key: "Brand", header: "Brand", width: 14 },
+                            { key: "Product", header: "Product", width: 22 },
+                            {
+                              key: "CES Score",
+                              header: "CES Score",
+                              width: 12,
+                            },
+                            {
+                              key: "Date of Visit",
+                              header: "Date of Visit",
+                              width: 14,
+                            },
+                            { key: "Agent", header: "Agent", width: 18 },
+                            { key: "Region", header: "Region", width: 16 },
+                            {
+                              key: "Type of Issue",
+                              header: "Type of Issue",
+                              width: 28,
+                            },
+                            {
+                              key: "Resolution",
+                              header: "Resolution",
+                              width: 28,
+                            },
+                            { key: "Remarks", header: "Remarks", width: 45 },
+                          ],
+                        },
+                      ],
+                    });
+                  } else {
+                    setPendingFeedbackExport(true);
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 rounded-md border border-indigo-300 bg-background px-3 py-1.5 text-xs font-medium text-indigo-700 hover:bg-indigo-600 hover:text-white hover:border-indigo-600 transition-colors shadow-sm"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Export
+              </button>
             </div>
-          )}
 
-          {/* ─── View: Customer Reviews (Masonry) ─────────────────────────── */}
-          {view === "masonry" && (
-            <div className="space-y-4">
-              {/* Masonry toolbar */}
-              <div className="flex flex-col gap-3">
-                <div className="relative flex-1">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-                  <Input
-                    className="pl-9"
-                    placeholder="Search by employee, FIPL, customer, brand, product, agent..."
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                  />
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <Select
-                    value={brandFilter}
-                    onValueChange={(v) => setBrandFilter(v)}
-                  >
-                    <SelectTrigger className="w-40">
-                      <SelectValue placeholder="All Brands" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All Brands</SelectItem>
-                      {BRANDS.map((b) => (
-                        <SelectItem key={b} value={b}>
-                          {b}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+            {/* Table */}
+            <div
+              className="rounded-xl border overflow-x-auto"
+              data-ocid="feedback.table"
+            >
+              <table className="w-full text-sm">
+                <thead className="bg-muted/50">
+                  <tr>
+                    {[
+                      "Date of Visit",
+                      "FSE",
+                      "Customer Name",
+                      "Region",
+                      "Brand",
+                      "Product",
+                      "CES Score",
+                      "Type of Issue",
+                      "Remark",
+                      "Agent",
+                    ].map((h) => (
+                      <th
+                        key={h}
+                        className="text-left px-4 py-3 font-medium text-muted-foreground whitespace-nowrap text-xs uppercase tracking-wide"
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {isLoading ? (
+                    <tr>
+                      <td
+                        colSpan={10}
+                        className="px-4 py-10 text-center text-muted-foreground"
+                        data-ocid="feedback.loading_state"
+                      >
+                        <Loader2 className="w-5 h-5 animate-spin mx-auto mb-2" />
+                        Loading records from Google Sheets...
+                      </td>
+                    </tr>
+                  ) : paginated.length === 0 ? (
+                    <tr>
+                      <td
+                        colSpan={10}
+                        className="px-4 py-10 text-center text-muted-foreground"
+                        data-ocid="feedback.empty_state"
+                      >
+                        No records found
+                      </td>
+                    </tr>
+                  ) : (
+                    paginated.map((f, idx) => (
+                      <tr
+                        key={f.id}
+                        data-ocid={`feedback.item.${idx + 1}`}
+                        className={`border-t transition-colors hover:bg-muted/30 ${f.cesScore < 30 ? "bg-red-50/40" : ""}`}
+                      >
+                        <td className="px-4 py-3 whitespace-nowrap text-muted-foreground text-xs">
+                          {formatDisplayDate(f.dateOfVisit)}
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="font-medium text-sm">
+                            {f.fseName || nameMap[f.fiplCode] || "—"}
+                          </div>
+                          <div className="text-xs text-muted-foreground font-mono">
+                            {f.fiplCode}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 font-medium">
+                          {f.customerName}
+                        </td>
+                        <td className="px-4 py-3 text-sm text-muted-foreground whitespace-nowrap">
+                          {f.region || "—"}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span
+                            className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium border ${brandColorClass(f.brand)}`}
+                          >
+                            {f.brand}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-sm">{f.product}</td>
+                        <td className="px-4 py-3">
+                          <CesBadge score={f.cesScore} />
+                        </td>
+                        <td className="px-4 py-3 text-sm">
+                          {f.typeOfIssue ? (
+                            <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium border bg-violet-50 text-violet-700 border-violet-200 whitespace-nowrap">
+                              {f.typeOfIssue}
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 max-w-[200px] text-sm text-muted-foreground">
+                          <button
+                            type="button"
+                            className="line-clamp-2 text-left cursor-pointer hover:text-blue-600 hover:underline bg-transparent border-none p-0"
+                            title="Click to view full details"
+                            onClick={() => setRemarkRecord(f)}
+                          >
+                            {f.remark || "—"}
+                          </button>
+                        </td>
+                        <td className="px-4 py-3 text-sm">{f.agent}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
 
-                  <Select
-                    value={cesFilter}
-                    onValueChange={(v) =>
-                      setCesFilter(v as "all" | "positive" | "negative")
-                    }
+            {/* Pagination */}
+            {pages > 1 && (
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-muted-foreground">
+                  Page {page + 1} of {pages}
+                </p>
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    data-ocid="feedback.pagination_prev"
+                    disabled={page === 0}
+                    onClick={() => setPage(page - 1)}
                   >
-                    <SelectTrigger className="w-44">
-                      <SelectValue placeholder="All Feedbacks" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All Feedbacks</SelectItem>
-                      <SelectItem value="positive">
-                        Positive (CES &gt;30)
-                      </SelectItem>
-                      <SelectItem value="negative">
-                        Negative (CES ≤30)
-                      </SelectItem>
-                    </SelectContent>
-                  </Select>
-
-                  <Select
-                    value={regionFilter}
-                    onValueChange={(v) => setRegionFilter(v)}
+                    Prev
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    data-ocid="feedback.pagination_next"
+                    disabled={page >= pages - 1}
+                    onClick={() => setPage(page + 1)}
                   >
-                    <SelectTrigger className="w-40">
-                      <SelectValue placeholder="All Regions" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All Regions</SelectItem>
-                      {regionOptions.map((r) => (
-                        <SelectItem key={r} value={r}>
-                          {r}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-
-                  <Select
-                    value={issueTypeFilter}
-                    onValueChange={(v) => setIssueTypeFilter(v)}
-                  >
-                    <SelectTrigger className="w-52">
-                      <SelectValue placeholder="All Issue Types" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">All Issue Types</SelectItem>
-                      {issueTypeOptions.map((t) => (
-                        <SelectItem key={t} value={t}>
-                          {t}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                    Next
+                  </Button>
                 </div>
               </div>
+            )}
+          </div>
 
+          {/* ─── Issue Insights Dashboard (replaces Customer Reviews) ──────────── */}
+          <div
+            className="rounded-xl border bg-card shadow-sm overflow-hidden"
+            data-ocid="feedback.issue_insights_section"
+          >
+            <div className="px-5 py-4 border-b bg-muted/30">
+              <h2 className="text-base font-bold tracking-tight">
+                📊 Issue Insights Dashboard
+              </h2>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Visual breakdown of recurring issues — click any card to explore
+                in depth
+              </p>
+            </div>
+            <div className="p-5">
               {isLoading ? (
                 <div
-                  className="flex flex-col items-center justify-center py-20 text-muted-foreground"
-                  data-ocid="feedback.loading_state"
+                  className="flex flex-col items-center justify-center py-16 text-muted-foreground"
+                  data-ocid="feedback.issue_insights_loading"
                 >
                   <Loader2 className="w-8 h-8 animate-spin mb-3" />
-                  Loading reviews from Google Sheets...
-                </div>
-              ) : filtered.length === 0 ? (
-                <div
-                  className="flex flex-col items-center justify-center py-20 text-muted-foreground"
-                  data-ocid="feedback.empty_state"
-                >
-                  <p className="text-lg font-medium">No reviews found</p>
-                  <p className="text-sm mt-1">
-                    Try adjusting your search or filters
-                  </p>
+                  Loading insights...
                 </div>
               ) : (
-                <div className="columns-1 sm:columns-2 lg:columns-3 gap-4">
-                  {filtered.map((f, idx) => (
-                    <ReviewCard key={f.id} entry={f} idx={idx} />
-                  ))}
-                </div>
+                <IssueInsightsDashboard
+                  records={allRecords}
+                  onSelectEmployee={onSelectEmployee}
+                />
               )}
             </div>
-          )}
+          </div>
 
           {/* Password Gate */}
           {pendingAction && (
@@ -1657,106 +2960,6 @@ export default function Feedback({
           )}
         </>
       )}
-    </div>
-  );
-}
-
-function ReviewCard({
-  entry: f,
-  idx,
-}: {
-  entry: DisplayRecord;
-  idx: number;
-}) {
-  const isLow = f.cesScore < 30;
-
-  return (
-    <div
-      data-ocid={`feedback.item.${idx + 1}`}
-      className={`break-inside-avoid mb-4 rounded-xl border bg-card p-4 shadow-sm transition-shadow hover:shadow-md ${
-        isLow
-          ? "border-l-4 border-l-red-500"
-          : "border-l-4 border-l-emerald-400"
-      }`}
-    >
-      {/* Top row: name + low CES badge */}
-      <div className="flex items-start justify-between gap-2 mb-2">
-        <p className="font-bold text-base leading-tight">{f.customerName}</p>
-        {isLow && (
-          <span className="shrink-0 inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold bg-red-100 text-red-700 border border-red-300 uppercase tracking-wide">
-            Low CES
-          </span>
-        )}
-      </div>
-
-      {/* Stars + score */}
-      <div className="flex items-center gap-2 mb-3">
-        <StarRating score={f.cesScore} />
-        <span
-          className={`text-xs font-semibold ${
-            isLow ? "text-red-600" : "text-emerald-600"
-          }`}
-        >
-          {f.cesScore}/40
-        </span>
-      </div>
-
-      {/* Brand badge */}
-      <div className="mb-2 flex flex-wrap gap-1">
-        <span
-          className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium border ${brandColorClass(
-            f.brand,
-          )}`}
-        >
-          {f.brand}
-        </span>
-        {f.typeOfIssue && (
-          <span className="inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium border bg-violet-50 text-violet-700 border-violet-200">
-            {f.typeOfIssue}
-          </span>
-        )}
-      </div>
-
-      {/* Product */}
-      <p className="text-sm font-medium mb-1">{f.product}</p>
-
-      {/* Remark */}
-      {f.remark && (
-        <p className="text-sm text-muted-foreground leading-relaxed mb-3">
-          {f.remark}
-        </p>
-      )}
-
-      {/* Resolution */}
-      {f.resolution && (
-        <p className="text-xs text-muted-foreground italic mb-2">
-          <span className="font-semibold not-italic">Resolution:</span>{" "}
-          {f.resolution}
-        </p>
-      )}
-
-      {/* Footer */}
-      <div className="border-t pt-2 mt-2 space-y-1">
-        <div className="flex items-center justify-between">
-          <span className="text-xs text-muted-foreground">
-            {formatDisplayDate(f.callDate)}
-          </span>
-          <span className="text-xs text-muted-foreground">
-            Agent: {f.agent}
-          </span>
-        </div>
-        {(f.fseName || f.fiplCode) && (
-          <p className="text-xs text-muted-foreground">
-            FSE: <span className="font-medium">{f.fseName || f.fiplCode}</span>{" "}
-            {f.fseName && <span className="font-mono">({f.fiplCode})</span>}
-          </p>
-        )}
-        {f.region && (
-          <p className="text-xs text-muted-foreground">
-            Region: <span className="font-medium">{f.region}</span>
-          </p>
-        )}
-      </div>
     </div>
   );
 }

@@ -1,0 +1,21 @@
+{
+  "overview": "Employee Performance Dashboard for Frootle India Pvt. Ltd. — a full-stack analytics platform tracking sales, attendance, feedback, surveys, SWOT analysis, and team performance. Connected live to Google Sheets for real-time data sync.",
+  "features": [
+    "Excel export for all dashboard sections respecting active filters",
+    "Feedback tab with Issue Insights Dashboard and Region Analysis",
+    "Sales Trends with multi-year comparison and product performance",
+    "Employee profiles with personality pentagon, SWOT, Lapses, PULSE/PRISM",
+    "Regional Analysis drill-down with employee, sales, and feedback breakdowns",
+    "Live Google Sheets backend with dynamic column mapping"
+  ],
+  "category": "productivity",
+  "tags": [
+    "dashboard",
+    "analytics",
+    "employee-performance",
+    "google-sheets",
+    "export",
+    "excel"
+  ],
+  "last_updated": "2026-04-27T07:55:12.180Z"
+}

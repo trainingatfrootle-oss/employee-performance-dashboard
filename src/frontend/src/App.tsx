@@ -1,6 +1,6 @@
 import { Toaster } from "@/components/ui/sonner";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Header } from "./components/Header";
 import { PasswordGate } from "./components/PasswordGate";
 import { type Module, Sidebar } from "./components/Sidebar";
@@ -9,6 +9,7 @@ import Dashboard from "./modules/Dashboard";
 import EmployeeProfile from "./modules/EmployeeProfile";
 import Employees from "./modules/Employees";
 import Feedback from "./modules/Feedback";
+import RegionalAnalysis from "./modules/RegionalAnalysis";
 import SalesTrends from "./modules/SalesTrends";
 import { Settings } from "./modules/Settings";
 import SuggestionsIssues from "./modules/SuggestionsIssues";
@@ -23,11 +24,47 @@ const queryClient = new QueryClient({
 // Modules that require password
 const PROTECTED_MODULES: Module[] = ["uploads", "settings"];
 
+// Persisted filter state shape for Employees tab
+export interface EmployeeFilterState {
+  search: string;
+  categoryFilter: string;
+  regionFilter: string;
+  statusFilter: "all" | "active" | "onHold" | "inactive";
+  agentFilter: string;
+  page: number;
+  sortField: "none" | "efficiency" | "lapses" | "sales";
+  sortDir: "asc" | "desc";
+}
+
+const DEFAULT_EMPLOYEE_FILTERS: EmployeeFilterState = {
+  search: "",
+  categoryFilter: "all",
+  regionFilter: "all",
+  statusFilter: "all",
+  agentFilter: "all",
+  page: 1,
+  sortField: "none",
+  sortDir: "desc",
+};
+
 function AppContent() {
   const [activeModule, setActiveModule] = useState<Module>("dashboard");
   const [selectedFiplCode, setSelectedFiplCode] = useState<string | null>(null);
-  // pendingModule: the module the user wants to navigate to, pending password
   const [pendingModule, setPendingModule] = useState<Module | null>(null);
+
+  // Persisted employee filter state — survives profile navigation
+  const employeeFiltersRef = useRef<EmployeeFilterState>({
+    ...DEFAULT_EMPLOYEE_FILTERS,
+  });
+  const [employeeFilters, setEmployeeFilters] = useState<EmployeeFilterState>({
+    ...DEFAULT_EMPLOYEE_FILTERS,
+  });
+
+  const updateEmployeeFilters = (patch: Partial<EmployeeFilterState>) => {
+    const next = { ...employeeFiltersRef.current, ...patch };
+    employeeFiltersRef.current = next;
+    setEmployeeFilters({ ...next });
+  };
 
   const handleNavigate = (mod: Module) => {
     if (PROTECTED_MODULES.includes(mod)) {
@@ -50,7 +87,7 @@ function AppContent() {
     setPendingModule(null);
   };
 
-  // Navigate to employee profile from any module (e.g. Dashboard Top Performers)
+  // Navigate to employee profile from any module
   const handleSelectEmployee = (fiplCode: string) => {
     setSelectedFiplCode(fiplCode);
     setActiveModule("employees");
@@ -75,12 +112,18 @@ function AppContent() {
           );
         }
         return (
-          <Employees onSelectEmployee={(fipl) => setSelectedFiplCode(fipl)} />
+          <Employees
+            onSelectEmployee={(fipl) => setSelectedFiplCode(fipl)}
+            persistedFilters={employeeFilters}
+            onFiltersChange={updateEmployeeFilters}
+          />
         );
       case "sales":
         return <SalesTrends />;
       case "feedback":
         return <Feedback onSelectEmployee={handleSelectEmployee} />;
+      case "regional-analysis":
+        return <RegionalAnalysis onSelectEmployee={handleSelectEmployee} />;
       case "uploads":
         return <Uploads />;
       case "settings":
@@ -108,7 +151,6 @@ function AppContent() {
           </a>
         </footer>
       </div>
-      {/* Password gate for protected navigation */}
       {pendingModule && (
         <PasswordGate
           gateKey={pendingModule}

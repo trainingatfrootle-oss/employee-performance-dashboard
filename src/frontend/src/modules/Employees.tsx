@@ -36,14 +36,20 @@ import {
 } from "@/components/ui/table";
 import {
   AlertTriangle,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
   ChevronLeft,
   ChevronRight,
+  Download,
   Filter,
   Plus,
   Search,
+  UserCog,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
+import type { EmployeeFilterState } from "../App";
 import { PasswordGate, usePasswordGate } from "../components/PasswordGate";
 import {
   type EmployeeRecord,
@@ -56,6 +62,11 @@ import {
   useDeleteEmployee,
   useUpdateEmployee,
 } from "../hooks/useQueries";
+import {
+  buildFilename,
+  exportToExcel,
+  formatFiltersForExport,
+} from "../lib/exportUtils";
 import type { Employee } from "../types/appTypes";
 
 const PAGE_SIZE = 15;
@@ -111,6 +122,7 @@ const EMPTY_EMPLOYEE: Employee = {
   avatarUrl: "",
   familyDetails: "",
   pastExperience: "",
+  agentName: "",
 };
 
 const normalizeKey = (s: string) =>
@@ -123,18 +135,15 @@ function parseYearMonth(
   d: string | null,
 ): { year: number; month: number } | null {
   if (!d) return null;
-  // ISO strings (contain "T"): use Date object with LOCAL time to avoid UTC timezone shift
   if (d.includes("T")) {
     const dt = new Date(d);
     if (!Number.isNaN(dt.getTime()))
       return { year: dt.getFullYear(), month: dt.getMonth() + 1 };
   }
-  // YYYY-MM-DD (no time component): safe to split directly
   if (/^\d{4}-\d{2}-\d{2}$/.test(d)) {
     const [y, m] = d.split("-").map(Number);
     return { year: y, month: m };
   }
-  // DD-MM-YYYY or DD/MM/YYYY
   const parts = d.split(/[-\/]/).map(Number);
   if (parts.length === 3) {
     if (parts[0] > 31) return { year: parts[0], month: parts[1] };
@@ -328,8 +337,12 @@ function EmployeeRow({
 
 export default function Employees({
   onSelectEmployee,
+  persistedFilters,
+  onFiltersChange,
 }: {
   onSelectEmployee: (fiplCode: string) => void;
+  persistedFilters?: EmployeeFilterState;
+  onFiltersChange?: (patch: Partial<EmployeeFilterState>) => void;
 }) {
   const {
     data: sheetEmployees = [],
@@ -361,6 +374,7 @@ export default function Employees({
         region: e.region,
         familyDetails: e.familyDetails,
         pastExperience: e.pastExperience,
+        agentName: e.agentName,
       })),
     [sheetEmployees],
   );
@@ -374,7 +388,7 @@ export default function Employees({
     return map;
   }, [allData]);
 
-  // Global last uploaded month for sales (max year+month across ALL sales records)
+  // Global last uploaded month for sales
   const lastSalesYM = useMemo(() => {
     let maxYear = 0;
     let maxMonth = 0;
@@ -389,7 +403,7 @@ export default function Employees({
     return maxYear ? { year: maxYear, month: maxMonth } : null;
   }, [allData]);
 
-  // Global last uploaded month for attendance (max year+month across ALL attendance records)
+  // Global last uploaded month for attendance
   const lastAttendanceYM = useMemo(() => {
     let maxYear = 0;
     let maxMonth = 0;
@@ -406,13 +420,35 @@ export default function Employees({
     return maxYear ? { year: maxYear, month: maxMonth } : null;
   }, [allData]);
 
-  const [search, setSearch] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState("all");
-  const [regionFilter, setRegionFilter] = useState("all");
+  // Filter state — initialized from persisted filters
+  const [search, setSearch] = useState(persistedFilters?.search ?? "");
+  const [categoryFilter, setCategoryFilter] = useState(
+    persistedFilters?.categoryFilter ?? "all",
+  );
+  const [regionFilter, setRegionFilter] = useState(
+    persistedFilters?.regionFilter ?? "all",
+  );
   const [statusFilter, setStatusFilter] = useState<
     "all" | "active" | "onHold" | "inactive"
-  >("all");
-  const [page, setPage] = useState(1);
+  >(persistedFilters?.statusFilter ?? "all");
+  const [agentFilter, setAgentFilter] = useState(
+    persistedFilters?.agentFilter ?? "all",
+  );
+  const [page, setPage] = useState(persistedFilters?.page ?? 1);
+  const [sortField, setSortField] = useState<
+    "none" | "efficiency" | "lapses" | "sales"
+  >(persistedFilters?.sortField ?? "none");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">(
+    persistedFilters?.sortDir ?? "desc",
+  );
+
+  // Helper to update both local state + persist to parent
+  const updateFilter = <K extends keyof EmployeeFilterState>(
+    key: K,
+    value: EmployeeFilterState[K],
+  ) => {
+    onFiltersChange?.({ [key]: value });
+  };
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [addEmpGate, setAddEmpGate] = useState(false);
@@ -420,9 +456,10 @@ export default function Employees({
   const [form, setForm] = useState<Employee>(EMPTY_EMPLOYEE);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
-  // Password gate for Actions (Edit/Delete)
   const { granted: actionsGranted, grant: grantActions } =
     usePasswordGate("employee-actions");
+  const { granted: exportGranted } = usePasswordGate("export");
+  const [pendingExportGate, setPendingExportGate] = useState(false);
   const [pendingAction, setPendingAction] = useState<
     | { type: "edit"; emp: Employee }
     | { type: "delete"; fiplCode: string }
@@ -439,6 +476,15 @@ export default function Employees({
     return Array.from(rs).sort();
   }, [employees]);
 
+  // Derive available agents from the EmployeeRecord data (has agentName from Employee Data sheet)
+  const agents = useMemo(() => {
+    const agentSet = new Set<string>();
+    for (const rec of allData?.employees ?? []) {
+      if (rec.agentName) agentSet.add(rec.agentName);
+    }
+    return Array.from(agentSet).sort();
+  }, [allData]);
+
   const filtered = useMemo(() => {
     const q = search.toLowerCase();
     return employees.filter((e) => {
@@ -449,7 +495,6 @@ export default function Employees({
       const matchCat =
         categoryFilter === "all" || e.fseCategory === categoryFilter;
       const matchRegion = regionFilter === "all" || e.region === regionFilter;
-      // Status filter: match against the sheet status string (case-insensitive)
       const sheetEmp = sheetEmployees.find(
         (se) => normalizeKey(se.fiplCode) === normalizeKey(e.fiplCode),
       );
@@ -459,7 +504,17 @@ export default function Employees({
       else if (statusFilter === "onHold") matchStatus = rawStatus === "on hold";
       else if (statusFilter === "inactive")
         matchStatus = rawStatus === "inactive";
-      return matchSearch && matchCat && matchRegion && matchStatus;
+
+      // Agent filter: match against agentName from EmployeeRecord
+      let matchAgent = true;
+      if (agentFilter !== "all") {
+        const rec = recordMap.get(normalizeKey(e.fiplCode));
+        matchAgent = (rec?.agentName ?? "") === agentFilter;
+      }
+
+      return (
+        matchSearch && matchCat && matchRegion && matchStatus && matchAgent
+      );
     });
   }, [
     employees,
@@ -468,10 +523,72 @@ export default function Employees({
     categoryFilter,
     regionFilter,
     statusFilter,
+    agentFilter,
+    recordMap,
   ]);
 
-  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-  const paginated = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  // Pre-compute sort values for each employee (keyed by normalized FIPL)
+  const sortValues = useMemo(() => {
+    const map = new Map<
+      string,
+      { efficiency: number; lapses: number; sales: number }
+    >();
+    for (const emp of employees) {
+      const key = normalizeKey(emp.fiplCode);
+      const rec = recordMap.get(key);
+      const perf = rec?.performance;
+      const efficiency = perf
+        ? (perf.salesInfluenceIndex +
+            perf.operationalDiscipline +
+            perf.productKnowledgeScore +
+            perf.softSkillScore) /
+          4
+        : -1;
+      const lapses =
+        lastAttendanceYM && rec
+          ? rec.attendance.filter((a) => {
+              const ym = parseYearMonth(a.date);
+              return (
+                ym &&
+                ym.year === lastAttendanceYM.year &&
+                ym.month === lastAttendanceYM.month
+              );
+            }).length
+          : -1;
+      const sales =
+        lastSalesYM && rec
+          ? rec.sales
+              .filter((s) => {
+                const ym = parseYearMonth(s.date);
+                return (
+                  ym &&
+                  ym.year === lastSalesYM.year &&
+                  ym.month === lastSalesYM.month
+                );
+              })
+              .reduce((acc, s) => acc + s.amount, 0)
+          : -1;
+      map.set(key, { efficiency, lapses, sales });
+    }
+    return map;
+  }, [employees, recordMap, lastAttendanceYM, lastSalesYM]);
+
+  // Sorted filtered list — applied AFTER filters, BEFORE pagination
+  const sortedFiltered = useMemo(() => {
+    if (sortField === "none") return filtered;
+    const dir = sortDir === "asc" ? 1 : -1;
+    return [...filtered].sort((a, b) => {
+      const va = sortValues.get(normalizeKey(a.fiplCode))?.[sortField] ?? -1;
+      const vb = sortValues.get(normalizeKey(b.fiplCode))?.[sortField] ?? -1;
+      return (va - vb) * dir;
+    });
+  }, [filtered, sortField, sortDir, sortValues]);
+
+  const totalPages = Math.max(1, Math.ceil(sortedFiltered.length / PAGE_SIZE));
+  const paginated = sortedFiltered.slice(
+    (page - 1) * PAGE_SIZE,
+    page * PAGE_SIZE,
+  );
 
   const isLoading = sheetLoading || allDataLoading;
 
@@ -487,7 +604,6 @@ export default function Employees({
     setDialogOpen(true);
   };
 
-  // Password-gated handlers for Edit and Delete
   const handleEditRequest = (emp: Employee) => {
     if (actionsGranted) {
       openEdit(emp);
@@ -547,6 +663,147 @@ export default function Employees({
   const setField = (k: keyof Employee, v: string) =>
     setForm((prev) => ({ ...prev, [k]: v }));
 
+  const handleExport = () => {
+    if (!exportGranted) {
+      setPendingExportGate(true);
+      return;
+    }
+    runExport();
+  };
+
+  const runExport = () => {
+    const filterLabels: Record<string, string> = {
+      Search: search,
+      Region: regionFilter,
+      Status: statusFilter,
+      Agent: agentFilter,
+      Sort: sortField,
+    };
+
+    const filename = buildFilename("Employees", {
+      Region: regionFilter,
+      Status: statusFilter,
+      Agent: agentFilter,
+      Sort: sortField,
+    });
+
+    const dataRows = sortedFiltered.map((emp) => {
+      const key = normalizeKey(emp.fiplCode);
+      const rec = recordMap.get(key);
+      const perf = rec?.performance;
+      const efficiencyScore = perf
+        ? Math.round(
+            ((perf.salesInfluenceIndex +
+              perf.operationalDiscipline +
+              perf.productKnowledgeScore +
+              perf.softSkillScore) /
+              4) *
+              10,
+          ) / 10
+        : null;
+
+      const lastMonthSalesAmt =
+        lastSalesYM && rec
+          ? rec.sales
+              .filter((s) => {
+                const ym = parseYearMonth(s.date);
+                return (
+                  ym &&
+                  ym.year === lastSalesYM.year &&
+                  ym.month === lastSalesYM.month
+                );
+              })
+              .reduce((acc, s) => acc + s.amount, 0)
+          : null;
+
+      const lastMonthLapsesCount =
+        lastAttendanceYM && rec
+          ? rec.attendance.filter((a) => {
+              const ym = parseYearMonth(a.date);
+              return (
+                ym &&
+                ym.year === lastAttendanceYM.year &&
+                ym.month === lastAttendanceYM.month
+              );
+            }).length
+          : null;
+
+      const sheetEmp = sheetEmployees.find(
+        (se) => normalizeKey(se.fiplCode) === key,
+      );
+      const rawStatus = sheetEmp?.status || emp.status || "";
+
+      return {
+        name: emp.name,
+        fiplCode: emp.fiplCode,
+        role: emp.role || "",
+        department: emp.department || "",
+        region: emp.region || "",
+        agent: rec?.agentName || emp.agentName || "",
+        status: rawStatus,
+        efficiencyScore:
+          efficiencyScore !== null ? String(efficiencyScore) : "N/A",
+        lastMonthSales:
+          lastMonthSalesAmt !== null
+            ? `₹${Math.round(lastMonthSalesAmt).toLocaleString("en-IN")}`
+            : "N/A",
+        lapsesLastMonth:
+          lastMonthLapsesCount !== null ? String(lastMonthLapsesCount) : "N/A",
+      };
+    });
+
+    const salesMonthLabel = lastSalesYM
+      ? monthLabel(lastSalesYM.year, lastSalesYM.month)
+      : "—";
+    const lapsesMonthLabel = lastAttendanceYM
+      ? monthLabel(lastAttendanceYM.year, lastAttendanceYM.month)
+      : "—";
+
+    exportToExcel({
+      filename,
+      filters: filterLabels,
+      sheets: [
+        {
+          name: "Summary",
+          isSummary: true,
+          data: [
+            {
+              "Export Date": new Date().toLocaleString("en-IN"),
+              "Filters Applied": formatFiltersForExport(filterLabels),
+              "Total Employees in Export": sortedFiltered.length,
+            },
+          ],
+        },
+        {
+          name: "Employee Directory",
+          data: dataRows,
+          columns: [
+            { key: "name", header: "Name", width: 28 },
+            { key: "fiplCode", header: "FIPL Code", width: 14 },
+            { key: "role", header: "Role", width: 20 },
+            { key: "department", header: "Department", width: 22 },
+            { key: "region", header: "Region", width: 16 },
+            { key: "agent", header: "Agent", width: 20 },
+            { key: "status", header: "Status", width: 14 },
+            { key: "efficiencyScore", header: "Efficiency Score", width: 18 },
+            {
+              key: "lastMonthSales",
+              header: `Last Month Sales ₹ (${salesMonthLabel})`,
+              width: 28,
+            },
+            {
+              key: "lapsesLastMonth",
+              header: `Lapses (${lapsesMonthLabel})`,
+              width: 22,
+            },
+          ],
+        },
+      ],
+    });
+
+    toast.success(`Exported ${sortedFiltered.length} employees to Excel`);
+  };
+
   return (
     <div className="space-y-4">
       {/* Error Banner */}
@@ -574,6 +831,8 @@ export default function Employees({
                 onChange={(e) => {
                   setSearch(e.target.value);
                   setPage(1);
+                  updateFilter("search", e.target.value);
+                  updateFilter("page", 1);
                 }}
                 data-ocid="employees.search_input"
               />
@@ -585,12 +844,14 @@ export default function Employees({
                 onValueChange={(v) => {
                   setCategoryFilter(v);
                   setPage(1);
+                  updateFilter("categoryFilter", v);
+                  updateFilter("page", 1);
                 }}
               >
                 <SelectTrigger className="h-9" data-ocid="employees.select">
                   <SelectValue placeholder="All Categories" />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className="max-h-56 overflow-y-auto overscroll-contain">
                   <SelectItem value="all">All Categories</SelectItem>
                   {categories.map((c) => (
                     <SelectItem key={c} value={c}>
@@ -606,12 +867,14 @@ export default function Employees({
                 onValueChange={(v) => {
                   setRegionFilter(v);
                   setPage(1);
+                  updateFilter("regionFilter", v);
+                  updateFilter("page", 1);
                 }}
               >
                 <SelectTrigger className="h-9" data-ocid="employees.select">
                   <SelectValue placeholder="All Regions" />
                 </SelectTrigger>
-                <SelectContent>
+                <SelectContent className="max-h-56 overflow-y-auto overscroll-contain">
                   <SelectItem value="all">All Regions</SelectItem>
                   {regions.map((r) => (
                     <SelectItem key={r} value={r}>
@@ -621,13 +884,66 @@ export default function Employees({
                 </SelectContent>
               </Select>
             </div>
+            {/* Agent Filter */}
+            {agents.length > 0 && (
+              <div className="flex items-center gap-1.5 min-w-[160px]">
+                <UserCog className="h-4 w-4 text-muted-foreground shrink-0" />
+                <Select
+                  value={agentFilter}
+                  onValueChange={(v) => {
+                    setAgentFilter(v);
+                    setPage(1);
+                    updateFilter("agentFilter", v);
+                    updateFilter("page", 1);
+                  }}
+                >
+                  <SelectTrigger
+                    className="h-9"
+                    data-ocid="employees.agent.select"
+                  >
+                    <SelectValue placeholder="All Agents" />
+                  </SelectTrigger>
+                  <SelectContent className="max-h-56 overflow-y-auto overscroll-contain">
+                    <SelectItem value="all">All Agents</SelectItem>
+                    {agents.map((a) => (
+                      <SelectItem key={a} value={a}>
+                        {a}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
           </div>
-          <Button
-            onClick={() => setAddEmpGate(true)}
-            data-ocid="employees.primary_button"
-          >
-            <Plus className="w-4 h-4 mr-1" /> Add Employee
-          </Button>
+          <div className="flex items-center gap-2">
+            {pendingExportGate && (
+              <PasswordGate
+                gateKey="export"
+                onUnlock={() => {
+                  setPendingExportGate(false);
+                  runExport();
+                }}
+                onCancel={() => setPendingExportGate(false)}
+              />
+            )}
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleExport}
+              disabled={sortedFiltered.length === 0}
+              data-ocid="employees.export_button"
+              className="h-9 gap-1.5 border-indigo-300 text-indigo-700 hover:bg-indigo-600 hover:text-white hover:border-indigo-600 transition-colors"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Export
+            </Button>
+            <Button
+              onClick={() => setAddEmpGate(true)}
+              data-ocid="employees.primary_button"
+            >
+              <Plus className="w-4 h-4 mr-1" /> Add Employee
+            </Button>
+          </div>
           {addEmpGate && (
             <PasswordGate
               gateKey="add-employee"
@@ -663,6 +979,8 @@ export default function Employees({
                 onClick={() => {
                   setStatusFilter(value);
                   setPage(1);
+                  updateFilter("statusFilter", value);
+                  updateFilter("page", 1);
                 }}
                 className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${
                   statusFilter === value
@@ -682,8 +1000,70 @@ export default function Employees({
             ))}
           </div>
           <span className="text-xs text-muted-foreground ml-1">
-            {filtered.length} employee{filtered.length !== 1 ? "s" : ""}
+            {sortedFiltered.length} employee
+            {sortedFiltered.length !== 1 ? "s" : ""}
           </span>
+        </div>
+
+        {/* Sort controls */}
+        <div
+          className="flex items-center gap-2 flex-wrap"
+          data-ocid="employees.sort_panel"
+        >
+          <span className="text-xs text-muted-foreground font-medium">
+            Sort by:
+          </span>
+          <div className="flex gap-1 p-1 bg-muted rounded-lg flex-wrap">
+            {[
+              { field: "none" as const, label: "Default" },
+              { field: "efficiency" as const, label: "Efficiency" },
+              { field: "lapses" as const, label: "Lapses" },
+              { field: "sales" as const, label: "Sales" },
+            ].map(({ field, label }) => (
+              <button
+                key={field}
+                type="button"
+                onClick={() => {
+                  if (sortField === field && field !== "none") {
+                    const newDir = sortDir === "desc" ? "asc" : "desc";
+                    setSortDir(newDir);
+                    updateFilter("sortDir", newDir);
+                  } else {
+                    setSortField(field);
+                    setSortDir("desc");
+                    updateFilter("sortField", field);
+                    updateFilter("sortDir", "desc");
+                  }
+                  setPage(1);
+                  updateFilter("page", 1);
+                }}
+                data-ocid={`employees.sort.${field}`}
+                className={`inline-flex items-center gap-1 px-3 py-1 rounded-md text-xs font-medium transition-all ${
+                  sortField === field && field !== "none"
+                    ? "bg-indigo-600 text-white shadow-sm"
+                    : field === "none" && sortField === "none"
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {label}
+                {sortField === field && field !== "none" ? (
+                  sortDir === "desc" ? (
+                    <ArrowDown className="w-3 h-3" />
+                  ) : (
+                    <ArrowUp className="w-3 h-3" />
+                  )
+                ) : field !== "none" ? (
+                  <ArrowUpDown className="w-3 h-3 opacity-40" />
+                ) : null}
+              </button>
+            ))}
+          </div>
+          {sortField !== "none" && (
+            <span className="text-xs text-muted-foreground">
+              {sortDir === "desc" ? "High → Low" : "Low → High"}
+            </span>
+          )}
         </div>
       </div>
 
@@ -696,9 +1076,31 @@ export default function Employees({
                 <TableRow className="hover:bg-transparent">
                   <TableHead className="w-[200px]">Name / FIPL</TableHead>
                   <TableHead>Region</TableHead>
-                  <TableHead>Efficiency</TableHead>
                   <TableHead>
-                    Attendance Lapses
+                    <span
+                      className={`flex items-center gap-1 ${sortField === "efficiency" ? "text-indigo-600" : ""}`}
+                    >
+                      Efficiency
+                      {sortField === "efficiency" &&
+                        (sortDir === "desc" ? (
+                          <ArrowDown className="w-3 h-3" />
+                        ) : (
+                          <ArrowUp className="w-3 h-3" />
+                        ))}
+                    </span>
+                  </TableHead>
+                  <TableHead>
+                    <span
+                      className={`flex items-center gap-1 ${sortField === "lapses" ? "text-indigo-600" : ""}`}
+                    >
+                      Attendance Lapses
+                      {sortField === "lapses" &&
+                        (sortDir === "desc" ? (
+                          <ArrowDown className="w-3 h-3" />
+                        ) : (
+                          <ArrowUp className="w-3 h-3" />
+                        ))}
+                    </span>
                     {lastAttendanceYM && (
                       <span className="block text-xs font-normal text-muted-foreground">
                         {monthLabel(
@@ -709,7 +1111,17 @@ export default function Employees({
                     )}
                   </TableHead>
                   <TableHead>
-                    Sales
+                    <span
+                      className={`flex items-center gap-1 ${sortField === "sales" ? "text-indigo-600" : ""}`}
+                    >
+                      Sales
+                      {sortField === "sales" &&
+                        (sortDir === "desc" ? (
+                          <ArrowDown className="w-3 h-3" />
+                        ) : (
+                          <ArrowUp className="w-3 h-3" />
+                        ))}
+                    </span>
                     {lastSalesYM && (
                       <span className="block text-xs font-normal text-muted-foreground">
                         {monthLabel(lastSalesYM.year, lastSalesYM.month)}
@@ -749,7 +1161,10 @@ export default function Employees({
                       employeeRecord={recordMap.get(normalizeKey(emp.fiplCode))}
                       lastSalesYM={lastSalesYM}
                       lastAttendanceYM={lastAttendanceYM}
-                      onSelect={onSelectEmployee}
+                      onSelect={(fipl) => {
+                        onSelectEmployee(fipl);
+                        updateFilter("page", page);
+                      }}
                       onEdit={handleEditRequest}
                       onDelete={handleDeleteRequest}
                     />
@@ -766,14 +1181,18 @@ export default function Employees({
         <div className="flex items-center justify-between text-sm text-muted-foreground">
           <span>
             Showing {(page - 1) * PAGE_SIZE + 1}–
-            {Math.min(page * PAGE_SIZE, filtered.length)} of {filtered.length}
+            {Math.min(page * PAGE_SIZE, sortedFiltered.length)} of{" "}
+            {sortedFiltered.length}
           </span>
           <div className="flex gap-1">
             <Button
               variant="outline"
               size="sm"
               disabled={page === 1}
-              onClick={() => setPage((p) => p - 1)}
+              onClick={() => {
+                setPage((p) => p - 1);
+                updateFilter("page", page - 1);
+              }}
               data-ocid="employees.pagination_prev"
             >
               <ChevronLeft className="w-4 h-4" />
@@ -785,7 +1204,10 @@ export default function Employees({
               variant="outline"
               size="sm"
               disabled={page === totalPages}
-              onClick={() => setPage((p) => p + 1)}
+              onClick={() => {
+                setPage((p) => p + 1);
+                updateFilter("page", page + 1);
+              }}
               data-ocid="employees.pagination_next"
             >
               <ChevronRight className="w-4 h-4" />
@@ -952,7 +1374,7 @@ export default function Employees({
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Password Gate for Actions (Edit/Delete) */}
+      {/* Password Gate for Actions */}
       {pendingAction && (
         <PasswordGate
           gateKey="employee-actions"

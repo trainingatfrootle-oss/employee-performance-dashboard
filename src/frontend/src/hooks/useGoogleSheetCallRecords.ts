@@ -17,6 +17,7 @@ export interface GoogleSheetCallRecord {
   product: string;
   cesScore: number;
   remark: string;
+  dateOfVisit: string;
   callDate: string;
   agent: string;
   typeOfIssue: string;
@@ -24,8 +25,8 @@ export interface GoogleSheetCallRecord {
 }
 
 // Fetch ALL call records directly — no employee-linking, no rows dropped
-// Sheet 7: FIPL Code | FSE Name | Customer Name | Brand | Product |
-//          CES Score | Remark | Date of Call | Agent
+// Sheet 7: FIPL Code | Date of Visit | FSE Name | Customer Name | Brand | Product |
+//          CES Score | Remark | Date of Call | Agent | Type of Issue | Resolution
 async function fetchCallRecords(): Promise<GoogleSheetCallRecord[]> {
   const { headers, rows } = await fetchSheetByName(SHEET_NAMES.callRecords);
   console.log("[Call Records Direct] Detected headers:", headers);
@@ -34,6 +35,9 @@ async function fetchCallRecords(): Promise<GoogleSheetCallRecord[]> {
     .map((row, idx) => {
       const fiplCode =
         normalizeText(cell(row, headers, "FIPL Code", "fipl")) ?? "";
+      const dateOfVisitRaw = cell(row, headers, "Date of Visit", "Visit Date");
+      const dateOfVisit =
+        parseDate(dateOfVisitRaw) ?? normalizeText(dateOfVisitRaw) ?? "";
       const fseName =
         normalizeText(cell(row, headers, "FSE Name", "FSE")) ?? "";
       const customerName =
@@ -66,6 +70,7 @@ async function fetchCallRecords(): Promise<GoogleSheetCallRecord[]> {
       return {
         id: `cr-${idx}`,
         fiplCode,
+        dateOfVisit,
         fseName,
         customerName,
         brand,

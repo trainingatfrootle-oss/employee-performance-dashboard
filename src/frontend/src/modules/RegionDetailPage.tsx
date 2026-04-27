@@ -42,6 +42,7 @@ interface DisplayRecord {
   product: string;
   cesScore: number;
   remark: string;
+  dateOfVisit: string;
   callDate: string;
   agent: string;
   source: "sheet" | "manual";
@@ -182,9 +183,9 @@ function EmployeeCard({
       { month: string; positive: number; negative: number }
     > = {};
     for (const r of stats.records) {
-      const key = getMonthKey(r.callDate);
+      const key = getMonthKey(r.dateOfVisit);
       if (!map[key]) map[key] = { month: key, positive: 0, negative: 0 };
-      if (r.cesScore > 30) map[key].positive++;
+      if (r.cesScore >= 30) map[key].positive++;
       else map[key].negative++;
     }
     return Object.values(map).sort(
@@ -208,8 +209,8 @@ function EmployeeCard({
     () =>
       [...stats.records]
         .sort((a, b) => {
-          const da = parseCallDate(a.callDate);
-          const db = parseCallDate(b.callDate);
+          const da = parseCallDate(a.dateOfVisit);
+          const db = parseCallDate(b.dateOfVisit);
           return (db?.getTime() ?? 0) - (da?.getTime() ?? 0);
         })
         .slice(0, 3),
@@ -220,7 +221,7 @@ function EmployeeCard({
   const notablePattern =
     negRate > 0.6
       ? `Majority feedback is negative (${Math.round(negRate * 100)}%). Primary driver: ${stats.topIssue || "unclassified"}.`
-      : stats.avgCes > 30
+      : stats.avgCes >= 30
         ? `Good CES performance. Average score: ${stats.avgCes.toFixed(1)}/40.`
         : "Mixed performance. Monitor closely.";
 
@@ -253,7 +254,7 @@ function EmployeeCard({
           </span>
           <span
             className={`text-xs rounded-full px-2 py-0.5 border font-semibold ${
-              stats.avgCes > 30
+              stats.avgCes >= 30
                 ? "bg-emerald-50 text-emerald-700 border-emerald-200"
                 : "bg-red-50 text-red-700 border-red-200"
             }`}
@@ -346,7 +347,7 @@ function EmployeeCard({
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="text-xs text-muted-foreground">
-                          {formatDisplayDate(r.callDate)}
+                          {formatDisplayDate(r.dateOfVisit)}
                         </span>
                         <span className="text-xs font-medium">
                           {r.customerName}
@@ -405,7 +406,8 @@ export default function RegionDetailPage({
   const filtered = useMemo(() => {
     return regionRecords.filter((r) => {
       if (dateFrom || dateTo) {
-        const d = parseCallDate(r.callDate);
+        const effectiveDate = r.dateOfVisit;
+        const d = parseCallDate(effectiveDate);
         if (dateFrom) {
           const from = new Date(dateFrom);
           if (!d || d < from) return false;
@@ -426,8 +428,8 @@ export default function RegionDetailPage({
           return false;
         }
       }
-      if (cesFilter === "positive" && r.cesScore <= 30) return false;
-      if (cesFilter === "negative" && r.cesScore > 30) return false;
+      if (cesFilter === "positive" && r.cesScore < 30) return false;
+      if (cesFilter === "negative" && r.cesScore >= 30) return false;
       return true;
     });
   }, [regionRecords, dateFrom, dateTo, issueCatFilter, cesFilter]);
@@ -441,8 +443,8 @@ export default function RegionDetailPage({
 
   // Summary stats
   const totalCount = filtered.length;
-  const positiveCount = filtered.filter((r) => r.cesScore > 30).length;
-  const negativeCount = filtered.filter((r) => r.cesScore <= 30).length;
+  const positiveCount = filtered.filter((r) => r.cesScore >= 30).length;
+  const negativeCount = filtered.filter((r) => r.cesScore < 30).length;
   const avgCes =
     totalCount > 0
       ? filtered.reduce((s, r) => s + r.cesScore, 0) / totalCount
@@ -455,9 +457,9 @@ export default function RegionDetailPage({
       { month: string; positive: number; negative: number }
     > = {};
     for (const r of filtered) {
-      const key = getMonthKey(r.callDate);
+      const key = getMonthKey(r.dateOfVisit);
       if (!map[key]) map[key] = { month: key, positive: 0, negative: 0 };
-      if (r.cesScore > 30) map[key].positive++;
+      if (r.cesScore >= 30) map[key].positive++;
       else map[key].negative++;
     }
     return Object.values(map).sort(
@@ -493,12 +495,12 @@ export default function RegionDetailPage({
   // Chart 3: CES score distribution buckets
   const cesBuckets = useMemo(() => {
     const buckets = [
-      { label: "0–10", min: 0, max: 10, count: 0, zone: "negative" },
-      { label: "11–20", min: 11, max: 20, count: 0, zone: "negative" },
-      { label: "21–30", min: 21, max: 30, count: 0, zone: "negative" },
-      { label: "31–50", min: 31, max: 50, count: 0, zone: "positive" },
-      { label: "51–70", min: 51, max: 70, count: 0, zone: "positive" },
-      { label: "71–100", min: 71, max: 100, count: 0, zone: "positive" },
+      { label: "0–9", min: 0, max: 9, count: 0, zone: "negative" },
+      { label: "10–19", min: 10, max: 19, count: 0, zone: "negative" },
+      { label: "20–29", min: 20, max: 29, count: 0, zone: "negative" },
+      { label: "30–49", min: 30, max: 49, count: 0, zone: "positive" },
+      { label: "50–69", min: 50, max: 69, count: 0, zone: "positive" },
+      { label: "70–100", min: 70, max: 100, count: 0, zone: "positive" },
     ];
     for (const r of filtered) {
       for (const b of buckets) {
@@ -529,7 +531,7 @@ export default function RegionDetailPage({
         };
       }
       map[key].total++;
-      if (r.cesScore > 30) map[key].positive++;
+      if (r.cesScore >= 30) map[key].positive++;
       else map[key].negative++;
       map[key].records.push(r);
     }
@@ -565,8 +567,8 @@ export default function RegionDetailPage({
       [...filtered]
         .filter((r) => r.cesScore < 30)
         .sort((a, b) => {
-          const da = parseCallDate(a.callDate);
-          const db = parseCallDate(b.callDate);
+          const da = parseCallDate(a.dateOfVisit);
+          const db = parseCallDate(b.dateOfVisit);
           return (db?.getTime() ?? 0) - (da?.getTime() ?? 0);
         })
         .slice(0, 10),
@@ -623,12 +625,12 @@ export default function RegionDetailPage({
             color="bg-card border-border text-foreground"
           />
           <SummaryBadge
-            label="Positive (CES >30)"
+            label="Positive (CES ≥30)"
             value={positiveCount.toLocaleString()}
             color="bg-emerald-50 border-emerald-200 text-emerald-800"
           />
           <SummaryBadge
-            label="Negative (CES ≤30)"
+            label="Negative (CES <30)"
             value={negativeCount.toLocaleString()}
             color="bg-red-50 border-red-200 text-red-800"
           />
@@ -636,7 +638,7 @@ export default function RegionDetailPage({
             label="Avg CES Score"
             value={`${avgCes.toFixed(1)}/40`}
             color={
-              avgCes > 30
+              avgCes >= 30
                 ? "bg-emerald-50 border-emerald-200 text-emerald-800"
                 : "bg-red-50 border-red-200 text-red-800"
             }
@@ -722,8 +724,8 @@ export default function RegionDetailPage({
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All Feedbacks</SelectItem>
-              <SelectItem value="positive">Positive (CES &gt;30)</SelectItem>
-              <SelectItem value="negative">Negative (CES ≤30)</SelectItem>
+              <SelectItem value="positive">Positive (CES ≥30)</SelectItem>
+              <SelectItem value="negative">Negative (CES &lt;30)</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -862,12 +864,12 @@ export default function RegionDetailPage({
             <span className="text-xs text-muted-foreground">Average CES:</span>
             <span
               className={`text-lg font-bold ${
-                avgCes > 30 ? "text-emerald-600" : "text-red-600"
+                avgCes >= 30 ? "text-emerald-600" : "text-red-600"
               }`}
             >
               {avgCes.toFixed(1)}/40
             </span>
-            {avgCes > 30 ? (
+            {avgCes >= 30 ? (
               <TrendingUp className="w-4 h-4 text-emerald-500" />
             ) : (
               <TrendingDown className="w-4 h-4 text-red-500" />
@@ -895,11 +897,11 @@ export default function RegionDetailPage({
           <div className="flex items-center gap-4 mt-2">
             <span className="flex items-center gap-1 text-xs text-muted-foreground">
               <span className="w-3 h-3 rounded-sm bg-red-400 inline-block" />
-              Negative zone (≤30)
+              Negative zone (&lt;30)
             </span>
             <span className="flex items-center gap-1 text-xs text-muted-foreground">
               <span className="w-3 h-3 rounded-sm bg-emerald-400 inline-block" />
-              Positive zone (&gt;30)
+              Positive zone (≥30)
             </span>
           </div>
         </div>
@@ -1005,7 +1007,7 @@ export default function RegionDetailPage({
                       </td>
                       <td
                         className={`px-4 py-3 text-center font-semibold ${
-                          s.avgCes > 30 ? "text-emerald-700" : "text-red-700"
+                          s.avgCes >= 30 ? "text-emerald-700" : "text-red-700"
                         }`}
                       >
                         {s.avgCes.toFixed(1)}
@@ -1071,7 +1073,7 @@ export default function RegionDetailPage({
             ⚠️ Recent Negative Feedback (Last 10)
           </h2>
           <p className="text-xs text-red-600 mt-0.5">
-            CES ≤30, sorted by most recent
+            CES &lt;30, sorted by most recent
           </p>
         </div>
         {recentNegative.length === 0 ? (
@@ -1108,7 +1110,7 @@ function NegativeFeedItem({ record: r }: { record: DisplayRecord }) {
         <div className="flex-1 min-w-0">
           <div className="flex flex-wrap items-center gap-2 mb-1">
             <span className="text-xs text-muted-foreground font-medium">
-              {formatDisplayDate(r.callDate)}
+              {formatDisplayDate(r.dateOfVisit)}
             </span>
             <span className="text-sm font-semibold">{r.customerName}</span>
             <span className="text-xs text-muted-foreground">

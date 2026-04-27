@@ -9,6 +9,7 @@ import {
   ChevronRight,
   LayoutDashboard,
   Lightbulb,
+  MapPin,
   MessageSquare,
   Settings,
   ShieldCheck,
@@ -26,7 +27,8 @@ export type Module =
   | "feedback"
   | "uploads"
   | "settings"
-  | "suggestions";
+  | "suggestions"
+  | "regional-analysis";
 
 interface SidebarProps {
   active: Module;
@@ -41,6 +43,7 @@ export function Sidebar({ active, onNavigate }: SidebarProps) {
     { id: "employees", label: labels.navEmployees, icon: Users },
     { id: "sales", label: labels.navSalesTrends, icon: TrendingUp },
     { id: "feedback", label: labels.navFeedback, icon: MessageSquare },
+    { id: "regional-analysis", label: "Regional Analysis", icon: MapPin },
     { id: "suggestions", label: labels.navSuggestionsIssues, icon: Lightbulb },
     { id: "uploads", label: labels.navUploads, icon: Upload },
     { id: "settings", label: labels.navSettings, icon: Settings },

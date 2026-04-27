@@ -14,14 +14,18 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   AlertTriangle,
+  Download,
   RefreshCw,
   TrendingUp,
   Trophy,
 } from "lucide-react";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
+import { toast } from "sonner";
+import { PasswordGate, usePasswordGate } from "../components/PasswordGate";
 import { useLabels } from "../contexts/UILabelsContext";
 import { useGoogleSheetData } from "../hooks/useGoogleSheetData";
 import { useAllSales } from "../hooks/useGoogleSheetSales";
+import { buildFilename, exportToExcel } from "../lib/exportUtils";
 
 function formatLastRefreshed(date: Date | null): string {
   if (!date) return "Never";
@@ -47,8 +51,13 @@ function parseSaleYear(dateStr: string): number {
   const v = dateStr
     .replace(/\uFEFF|\u00A0|\u200B|\u200C|\u200D|\uFFFE|\r|\t/g, "")
     .trim();
-  // ISO with T — extract YYYY from date portion (local, not UTC)
-  if (v.includes("T")) return Number.parseInt(v.split("T")[0].split("-")[0]);
+  // ISO with T — MUST use local Date methods (not the UTC date part before "T")
+  // e.g. "2026-03-31T18:30:00.000Z" is April 1 in IST; new Date(v).getFullYear() = 2026 ✓
+  if (v.includes("T")) {
+    const d = new Date(v);
+    if (!Number.isNaN(d.getTime())) return d.getFullYear();
+    return Number.NaN;
+  }
   // YYYY-MM-DD
   const iso = v.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (iso) return Number.parseInt(iso[1]);
@@ -65,16 +74,14 @@ function parseSaleYearMonth(dateStr: string): { year: number; month: number } {
     .trim();
   if (!v) return { year: Number.NaN, month: Number.NaN };
 
-  // ISO string with T — parse the date portion before T (local date, avoids UTC shift)
+  // ISO string with T — MUST use local Date methods (getFullYear/getMonth), NOT the
+  // date portion before "T". The date before "T" is the UTC date, which for IST (+5:30)
+  // shifts an April 1 local midnight to March 31 UTC — giving the wrong month.
+  // new Date(v).getFullYear() / getMonth() returns the LOCAL calendar date. ✓
   if (v.includes("T")) {
-    const datePart = v.split("T")[0]; // "YYYY-MM-DD"
-    const parts = datePart.split("-").map(Number);
-    if (parts.length >= 3 && parts[0] > 31)
-      return { year: parts[0], month: parts[1] };
-    // Fallback to UTC
     const d = new Date(v);
     if (!Number.isNaN(d.getTime()))
-      return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1 };
+      return { year: d.getFullYear(), month: d.getMonth() + 1 };
     return { year: Number.NaN, month: Number.NaN };
   }
   // DD-MM-YYYY or DD/MM/YYYY
@@ -177,6 +184,8 @@ export default function Dashboard({
   const topPerformers = data?.topPerformers ?? [];
 
   const { labels } = useLabels();
+  const { granted: exportGranted } = usePasswordGate("export");
+  const [pendingExportGate, setPendingExportGate] = useState(false);
 
   // ── Sales KPIs ────────────────────────────────────────────────────────────
   const { lastMonthSales, lastMonthLabel, currentYearSales } = useMemo(() => {
@@ -237,6 +246,73 @@ export default function Dashboard({
 
   function handleRefresh() {
     queryClient.invalidateQueries({ queryKey: ["allEmployeeData"] });
+  }
+
+  function handleExportTopPerformers() {
+    const filename = buildFilename("TopPerformers", {
+      Month: "Last Uploaded Month",
+    });
+
+    const dataRows = topPerformers.map((p, i) => ({
+      rank: String(p.rank || i + 1),
+      name: p.name || "",
+      fiplCode: p.fiplCode || "",
+      region: p.region || "",
+      accessories:
+        p.accessories != null
+          ? `₹${Number(p.accessories).toLocaleString("en-IN")}`
+          : "N/A",
+      extendedWarranty:
+        p.extendedWarranty != null
+          ? `₹${Number(p.extendedWarranty).toLocaleString("en-IN")}`
+          : "N/A",
+      totalSales:
+        p.totalSales != null
+          ? `₹${Number(p.totalSales).toLocaleString("en-IN")}`
+          : "N/A",
+    }));
+
+    exportToExcel({
+      filename,
+      filters: {
+        Month: lastMonthLabel,
+        "Active Employees": activeCount.toString(),
+      },
+      sheets: [
+        {
+          name: "Summary",
+          isSummary: true,
+          data: [
+            {
+              "Export Date": new Date().toLocaleString("en-IN"),
+              "Active Employees Count": activeCount,
+              "Total Sales Last Month": formatRupeeAmount(lastMonthSales),
+              "Total Sales Current Year": formatRupeeAmount(currentYearSales),
+              "Last Month": lastMonthLabel,
+            },
+          ],
+        },
+        {
+          name: "Top Performers",
+          data: dataRows,
+          columns: [
+            { key: "rank", header: "Rank", width: 8 },
+            { key: "name", header: "Employee Name", width: 28 },
+            { key: "fiplCode", header: "FIPL Code", width: 14 },
+            { key: "region", header: "Region", width: 16 },
+            { key: "accessories", header: "Accessories Sales", width: 22 },
+            {
+              key: "extendedWarranty",
+              header: "Extended Warranty Sales",
+              width: 26,
+            },
+            { key: "totalSales", header: "Total Sales (₹)", width: 20 },
+          ],
+        },
+      ],
+    });
+
+    toast.success(`Exported ${topPerformers.length} top performers to Excel`);
   }
 
   return (
@@ -316,13 +392,39 @@ export default function Dashboard({
               <Trophy size={16} className="text-amber-500" />
               {labels.topPerformersSectionHeader}
             </CardTitle>
-            <Badge
-              variant="secondary"
-              className="text-xs font-normal shrink-0"
-              data-ocid="dashboard.performers_source_badge"
-            >
-              Live Sheet
-            </Badge>
+            <div className="flex items-center gap-2 shrink-0">
+              {pendingExportGate && (
+                <PasswordGate
+                  gateKey="export"
+                  onUnlock={() => {
+                    setPendingExportGate(false);
+                    handleExportTopPerformers();
+                  }}
+                  onCancel={() => setPendingExportGate(false)}
+                />
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  if (exportGranted) handleExportTopPerformers();
+                  else setPendingExportGate(true);
+                }}
+                disabled={combinedLoading || topPerformers.length === 0}
+                data-ocid="dashboard.export_performers_button"
+                className="h-7 gap-1 text-xs border-indigo-300 text-indigo-700 hover:bg-indigo-600 hover:text-white hover:border-indigo-600 transition-colors"
+              >
+                <Download className="w-3 h-3" />
+                Export
+              </Button>
+              <Badge
+                variant="secondary"
+                className="text-xs font-normal"
+                data-ocid="dashboard.performers_source_badge"
+              >
+                Live Sheet
+              </Badge>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="p-0">

@@ -8,11 +8,12 @@ export interface GoogleSheetEmployee {
   fseCategory: string;
   status: string;
   joinDate: string;
-  avatar: string; // initials e.g. "PS"
+  avatar: string;
   region: string;
   familyDetails: string;
   pastExperience: string;
   vehicleDetails: string;
+  agentName: string;
 }
 
 export function useGoogleSheetEmployees() {
@@ -30,6 +31,7 @@ export function useGoogleSheetEmployees() {
     familyDetails: e.familyDetails ?? "",
     pastExperience: e.pastExperience ?? "",
     vehicleDetails: e.vehicleDetails ?? "",
+    agentName: e.agentName ?? "",
   }));
   return { data: employees, isLoading, isFetching, isError };
 }

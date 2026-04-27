@@ -39,6 +39,7 @@ import {
   Bar,
   BarChart,
   CartesianGrid,
+  Cell,
   ComposedChart,
   Legend,
   Line,
@@ -382,9 +383,77 @@ export default function EmployeeProfile({
   }, [attendance, attendanceYear, attendanceMonth]);
 
   // ── Attendance chart ─────────────────────────────────────────────────────
+  // Lapse chart filter state (independent from table filters)
+  const [lapsesChartYear, setLapsesChartYear] = useState("all");
+  const [lapsesChartType, setLapsesChartType] = useState("all");
+
+  const uniqueLapseTypes = useMemo(() => {
+    const types = new Set<string>();
+    for (const a of attendance) {
+      if (a.lapsesType) types.add(a.lapsesType);
+    }
+    return Array.from(types).sort();
+  }, [attendance]);
+
+  const lapsesChartData = useMemo(() => {
+    // Filter attendance by chart's year and type filters
+    const filtered = attendance.filter((a) => {
+      if (!a.date) return false;
+      const parts = a.date.split(/[-/]/).map(Number);
+      if (parts.length !== 3) return false;
+      const year = parts[0] > 31 ? parts[0] : parts[2];
+      if (lapsesChartYear !== "all" && year.toString() !== lapsesChartYear)
+        return false;
+      if (lapsesChartType !== "all" && a.lapsesType !== lapsesChartType)
+        return false;
+      return true;
+    });
+
+    // Get all unique types in filtered data
+    const activeTypes = new Set<string>();
+    for (const a of filtered) {
+      if (a.lapsesType) activeTypes.add(a.lapsesType);
+    }
+    const types = Array.from(activeTypes).sort();
+
+    // Build month buckets
+    const monthBuckets: Record<string, Record<string, number>> = {};
+    for (let i = 0; i < 12; i++) {
+      monthBuckets[MONTH_NAMES[i]] = {};
+      for (const t of types) monthBuckets[MONTH_NAMES[i]][t] = 0;
+    }
+
+    for (const a of filtered) {
+      if (!a.date) continue;
+      const parts = a.date.split(/[-/]/).map(Number);
+      if (parts.length !== 3) continue;
+      const month = parts[0] > 31 ? parts[1] : parts[1]; // month is always middle
+      const monthName = MONTH_NAMES[month - 1];
+      if (!monthName) continue;
+      const lapseType = a.lapsesType || "Unknown";
+      if (!monthBuckets[monthName]) continue;
+      monthBuckets[monthName][lapseType] =
+        (monthBuckets[monthName][lapseType] || 0) + 1;
+    }
+
+    return {
+      data: MONTH_NAMES.map((m) => ({ month: m, ...monthBuckets[m] })),
+      types,
+    };
+  }, [attendance, lapsesChartYear, lapsesChartType]);
+
+  const LAPSE_COLORS = [
+    "#ef4444",
+    "#f97316",
+    "#f59e0b",
+    "#8b5cf6",
+    "#06b6d4",
+    "#10b981",
+  ];
+
   const filteredFeedback = useMemo(() => {
     if (feedbackFilter === "positive")
-      return feedback.filter((f) => f.cesScore > 30);
+      return feedback.filter((f) => f.cesScore >= 30);
     if (feedbackFilter === "negative")
       return feedback.filter((f) => f.cesScore < 30);
     return feedback;
@@ -443,6 +512,14 @@ export default function EmployeeProfile({
                 <span>📍 {employee.region || "No region"}</span>
                 <span>🏢 {employee.department || "No dept"}</span>
                 <span>💼 {employee.role || "No role"}</span>
+                {employee.agentName && (
+                  <span>
+                    🤝 Agent:{" "}
+                    <span className="font-medium text-foreground">
+                      {employee.agentName}
+                    </span>
+                  </span>
+                )}
                 {employee.joinDate && (
                   <span>
                     📅 Joined {(() => {
@@ -1252,7 +1329,7 @@ export default function EmployeeProfile({
                       {opt === "all"
                         ? "All Feedbacks"
                         : opt === "positive"
-                          ? "Positive (CES >30)"
+                          ? "Positive (CES ≥30)"
                           : "Negative (CES <30)"}
                     </button>
                   ))}
@@ -1265,7 +1342,7 @@ export default function EmployeeProfile({
                   <Table>
                     <TableHeader>
                       <TableRow>
-                        <TableHead>Date</TableHead>
+                        <TableHead>Date of Visit</TableHead>
                         <TableHead>Customer</TableHead>
                         <TableHead>Brand</TableHead>
                         <TableHead>Product</TableHead>
@@ -1287,7 +1364,7 @@ export default function EmployeeProfile({
                       ) : (
                         filteredFeedback.map((fb, i) => (
                           <TableRow
-                            key={`fb-${fb.dateOfCall ?? ""}-${fb.customerName ?? ""}-${i}`}
+                            key={`fb-${fb.dateOfVisit ?? ""}-${fb.customerName ?? ""}-${i}`}
                             className={
                               fb.cesScore < 30
                                 ? "bg-red-50 hover:bg-red-100"
@@ -1296,18 +1373,18 @@ export default function EmployeeProfile({
                             data-ocid={`employees.item.${i + 1}`}
                           >
                             <TableCell className="text-sm">
-                              {fb.dateOfCall
-                                ? (() => {
-                                    const d = new Date(fb.dateOfCall);
-                                    return Number.isNaN(d.getTime())
-                                      ? fb.dateOfCall
-                                      : d.toLocaleDateString("en-IN", {
-                                          day: "2-digit",
-                                          month: "short",
-                                          year: "numeric",
-                                        });
-                                  })()
-                                : "—"}
+                              {(() => {
+                                const dateStr = fb.dateOfVisit;
+                                if (!dateStr) return "—";
+                                const d = new Date(dateStr);
+                                return Number.isNaN(d.getTime())
+                                  ? dateStr
+                                  : d.toLocaleDateString("en-IN", {
+                                      day: "2-digit",
+                                      month: "short",
+                                      year: "numeric",
+                                    });
+                              })()}
                             </TableCell>
                             <TableCell className="text-sm">
                               {fb.customerName ?? "—"}
@@ -1323,7 +1400,7 @@ export default function EmployeeProfile({
                                 className={`font-semibold ${
                                   fb.cesScore < 30
                                     ? "text-red-600"
-                                    : fb.cesScore > 30
+                                    : fb.cesScore >= 30
                                       ? "text-green-600"
                                       : "text-muted-foreground"
                                 }`}
@@ -1433,21 +1510,21 @@ export default function EmployeeProfile({
                 </div>
                 <div>
                   <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">
-                    Date
+                    Date of Visit
                   </p>
                   <p className="font-medium">
-                    {selectedFeedback.dateOfCall
-                      ? (() => {
-                          const d = new Date(selectedFeedback.dateOfCall);
-                          return Number.isNaN(d.getTime())
-                            ? selectedFeedback.dateOfCall
-                            : d.toLocaleDateString("en-IN", {
-                                day: "2-digit",
-                                month: "short",
-                                year: "numeric",
-                              });
-                        })()
-                      : "—"}
+                    {(() => {
+                      const dateStr = selectedFeedback.dateOfVisit;
+                      if (!dateStr) return "—";
+                      const d = new Date(dateStr);
+                      return Number.isNaN(d.getTime())
+                        ? dateStr
+                        : d.toLocaleDateString("en-IN", {
+                            day: "2-digit",
+                            month: "short",
+                            year: "numeric",
+                          });
+                    })()}
                   </p>
                 </div>
                 <div>
@@ -1472,7 +1549,7 @@ export default function EmployeeProfile({
                     className={`font-bold ${selectedFeedback.cesScore < 30 ? "text-red-600" : "text-green-600"}`}
                   >
                     {selectedFeedback.cesScore} —{" "}
-                    {selectedFeedback.cesScore < 30 ? "Negative" : "Positive"}
+                    {selectedFeedback.cesScore >= 30 ? "Positive" : "Negative"}
                   </p>
                 </div>
                 <div>
@@ -1509,6 +1586,93 @@ export default function EmployeeProfile({
           </p>
         ) : (
           <>
+            {/* ── Lapses Bar Chart ─────────────────────────────── */}
+            <div className="mb-6">
+              <div className="flex flex-wrap gap-3 mb-3">
+                <span className="text-xs font-semibold text-muted-foreground self-center uppercase tracking-wide">
+                  Lapses Analysis Chart
+                </span>
+                <Select
+                  value={lapsesChartYear}
+                  onValueChange={setLapsesChartYear}
+                >
+                  <SelectTrigger
+                    className="w-32 h-8 text-sm"
+                    data-ocid="employees.select"
+                  >
+                    <SelectValue placeholder="All Years" />
+                  </SelectTrigger>
+                  <SelectContent className="max-h-56 overflow-y-auto overscroll-contain">
+                    <SelectItem value="all">All Years</SelectItem>
+                    {attendanceAvailableYears.map((y) => (
+                      <SelectItem key={y} value={y}>
+                        {y}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select
+                  value={lapsesChartType}
+                  onValueChange={setLapsesChartType}
+                >
+                  <SelectTrigger
+                    className="w-44 h-8 text-sm"
+                    data-ocid="employees.select"
+                  >
+                    <SelectValue placeholder="All Lapse Types" />
+                  </SelectTrigger>
+                  <SelectContent className="max-h-56 overflow-y-auto overscroll-contain">
+                    <SelectItem value="all">All Lapse Types</SelectItem>
+                    {uniqueLapseTypes.map((t) => (
+                      <SelectItem key={t} value={t}>
+                        {t}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              {lapsesChartData.types.length === 0 ? (
+                <div className="h-[180px] flex items-center justify-center text-muted-foreground text-sm bg-muted/20 rounded-lg">
+                  No lapses data for selected filters
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height={200}>
+                  <BarChart
+                    data={lapsesChartData.data}
+                    margin={{ top: 5, right: 16, bottom: 5, left: 8 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" opacity={0.4} />
+                    <XAxis dataKey="month" tick={{ fontSize: 11 }} />
+                    <YAxis
+                      allowDecimals={false}
+                      tick={{ fontSize: 10 }}
+                      width={30}
+                    />
+                    <Tooltip
+                      formatter={(val: number, name: string) => [val, name]}
+                      contentStyle={{ fontSize: 12 }}
+                    />
+                    {lapsesChartData.types.length > 1 && (
+                      <Legend wrapperStyle={{ fontSize: 11 }} />
+                    )}
+                    {lapsesChartData.types.map((type, idx) => (
+                      <Bar
+                        key={type}
+                        dataKey={type}
+                        name={type}
+                        stackId="lapses"
+                        fill={LAPSE_COLORS[idx % LAPSE_COLORS.length]}
+                        radius={
+                          idx === lapsesChartData.types.length - 1
+                            ? [4, 4, 0, 0]
+                            : [0, 0, 0, 0]
+                        }
+                      />
+                    ))}
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
+            </div>
             {/* Year + Month filters */}
             <div className="flex flex-wrap gap-3 mb-4">
               <Select

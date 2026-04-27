@@ -4,6 +4,23 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ─── Global Dropdown Scrollbar Enhancement ───────────────────────────────── */
+/* All Radix Select, Popover, and custom dropdown containers get consistent
+   max-height + visible scrollbar so large lists scroll smoothly */
+[data-radix-select-viewport],
+[data-radix-select-content] {
+  max-height: 14rem !important; /* 224px ≈ max-h-56 */
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+}
+
+[data-radix-popper-content-wrapper] > [role="listbox"],
+[data-radix-popper-content-wrapper] > [role="combobox"] {
+  max-height: 14rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
 @layer base {
   :root {
     --radius: 0.5rem;

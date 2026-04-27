@@ -48,6 +48,7 @@ export interface Employee {
   region: string;
   familyDetails?: string;
   pastExperience?: string;
+  agentName?: string;
 }
 
 export interface Performance {
@@ -103,6 +104,7 @@ export interface FeedbackEntry {
   cesScore: number;
   remark: string;
   callDate: string;
+  dateOfVisit?: string;
   agent: string;
   typeOfIssue?: string;
   resolution?: string;

@@ -12,8 +12,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   BarChart3,
   ChevronDown,
+  Download,
+  Package,
   Search,
   TrendingUp,
+  UserX,
   Users,
   X,
 } from "lucide-react";
@@ -29,15 +32,24 @@ import {
   Legend,
   Line,
   LineChart,
+  Pie,
+  PieChart,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
+import { PasswordGate, usePasswordGate } from "../components/PasswordGate";
 import { useLabels } from "../contexts/UILabelsContext";
+import { useEmployees } from "../hooks/useAllEmployeeData";
 import { useGoogleSheetEmployees } from "../hooks/useGoogleSheetEmployees";
 import { useGoogleSheetSales } from "../hooks/useGoogleSheetSales";
+import {
+  buildFilename,
+  exportToExcel,
+  formatFiltersForExport,
+} from "../lib/exportUtils";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -69,6 +81,7 @@ const MONTH_LABELS = [
 
 const PAGE_SIZE = 15;
 type ViewMode = "yearly" | "half-yearly" | "monthly" | "weekly" | "daily";
+type EmployeeStatusFilter = "all" | "active" | "inactive";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -86,9 +99,18 @@ function parseDateParts(dateStr: string): {
 } {
   if (!dateStr) return { year: Number.NaN, month: Number.NaN, day: Number.NaN };
   const v = dateStr.trim();
+  // ISO strings (contain "T"): the ISO was produced by parseDate() in googleSheets.ts
+  // using `new Date(localYear, localMonth-1, localDay).toISOString()`.
+  // In IST (UTC+5:30), April 1 local → "2026-03-31T18:30:00.000Z" — the UTC date
+  // portion in the string is March 31, but the original local date was April 1.
+  // Recover the original local date by re-parsing the UTC ms and reading local getters
+  // from a Date object — which gives the correct local calendar date.
   if (v.includes("T")) {
     const d = new Date(v);
     if (!Number.isNaN(d.getTime())) {
+      // getFullYear/getMonth/getDate use the local timezone of the JS runtime.
+      // Since parseDate() originally used local Date constructor, this round-trips
+      // correctly to the same local calendar date.
       return {
         year: d.getFullYear(),
         month: d.getMonth() + 1,
@@ -221,7 +243,7 @@ function FSECombobox({ options, value, onChange }: FSEComboboxProps) {
       </div>
       {open && (
         <div
-          className="absolute z-50 top-full left-0 right-0 mt-1 bg-popover border border-border rounded-md shadow-lg max-h-56 overflow-y-auto"
+          className="absolute z-50 top-full left-0 right-0 mt-1 bg-popover border border-border rounded-md shadow-lg max-h-56 overflow-y-auto overscroll-contain"
           data-ocid="fse.popover"
         >
           {filtered.length === 0 ? (
@@ -283,15 +305,70 @@ function RupeesTooltip({
   );
 }
 
+// ─── Employee Status Toggle ──────────────────────────────────────────────────
+
+function EmployeeStatusToggle({
+  value,
+  onChange,
+}: {
+  value: EmployeeStatusFilter;
+  onChange: (v: EmployeeStatusFilter) => void;
+}) {
+  const options: { value: EmployeeStatusFilter; label: string }[] = [
+    { value: "all", label: "All" },
+    { value: "active", label: "Active" },
+    { value: "inactive", label: "Inactive" },
+  ];
+  return (
+    <div
+      className="flex gap-0.5 p-1 bg-muted rounded-lg"
+      data-ocid="emp_status.toggle"
+    >
+      {options.map((o) => (
+        <button
+          key={o.value}
+          type="button"
+          onClick={() => onChange(o.value)}
+          data-ocid={`emp_status.${o.value}.tab`}
+          className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${
+            value === o.value
+              ? "bg-indigo-600 text-white shadow-sm"
+              : "text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 // ─── Main Component ──────────────────────────────────────────────────────────────
 
 export default function SalesTrends() {
   const { labels } = useLabels();
   const { data: employees = [], isLoading: empLoading } =
     useGoogleSheetEmployees();
+  const { data: allEmployeeRecords = [] } = useEmployees();
   const { data: allSales = [], isLoading: salesLoading } =
     useGoogleSheetSales();
   const isLoading = empLoading || salesLoading;
+
+  const { granted: exportGranted } = usePasswordGate("export");
+  const [pendingExportKey, setPendingExportKey] = useState<
+    "transactions" | "zeroSales" | "products" | null
+  >(null);
+
+  // Build employee status map: fiplCode (lowercase) → normalized status
+  const empStatusMap = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const e of allEmployeeRecords) {
+      m[e.fiplCode.toLowerCase().replace(/[^a-z0-9]/g, "")] = (e.status ?? "")
+        .toLowerCase()
+        .replace(/\s+/g, "");
+    }
+    return m;
+  }, [allEmployeeRecords]);
 
   const empMap = useMemo(() => {
     const m: Record<string, { name: string; region: string }> = {};
@@ -322,15 +399,32 @@ export default function SalesTrends() {
   const [regionFilter, setRegionFilter] = useState("all");
   const [fseFilter, setFseFilter] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("monthly");
+  const [employeeStatusFilter, setEmployeeStatusFilter] =
+    useState<EmployeeStatusFilter>("all");
   // Transaction records additional filters
   const [txDateFilter, setTxDateFilter] = useState("all");
   const [txMonthFilter, setTxMonthFilter] = useState("all");
   const [txYearFilter, setTxYearFilter] = useState("all");
   const [txPage, setTxPage] = useState(0);
 
+  // Helper: check if a sale's employee status matches the filter
+  const matchesStatusFilter = useMemo(() => {
+    return (fiplCode: string): boolean => {
+      if (employeeStatusFilter === "all") return true;
+      const normalKey = fiplCode.toLowerCase().replace(/[^a-z0-9]/g, "");
+      const status = empStatusMap[normalKey] ?? "";
+      if (employeeStatusFilter === "active") {
+        return status === "active";
+      }
+      // inactive = inactive OR onhold (not active)
+      return status !== "active";
+    };
+  }, [employeeStatusFilter, empStatusMap]);
+
   // Filtered sales (for chart/stats)
   const filteredSales = useMemo(() => {
     return allSales.filter((s) => {
+      if (!matchesStatusFilter(s.fiplCode)) return false;
       const { year, month, day } = parseDateParts(s.date);
       if (yearFilter !== "all" && year !== Number(yearFilter)) return false;
       if (monthFilter !== "all" && month !== Number(monthFilter)) return false;
@@ -350,6 +444,7 @@ export default function SalesTrends() {
     regionFilter,
     fseFilter,
     empMap,
+    matchesStatusFilter,
   ]);
 
   // Available days/years for tx filters
@@ -404,7 +499,6 @@ export default function SalesTrends() {
         if (!(key in acc)) order.push(key);
         acc[key] = (acc[key] || 0) + s.amount;
       }
-      // Sort by year then week
       order.sort((a, b) => {
         const [wa, ya] = a.replace("Wk", "").split(" ").map(Number);
         const [wb, yb] = b.replace("Wk", "").split(" ").map(Number);
@@ -448,7 +542,6 @@ export default function SalesTrends() {
   // All Years multi-line pivot data
   const allYearsData = useMemo(() => {
     if (yearFilter !== "all") return null;
-    // Collect unique years in filteredSales
     const yearsSet = new Set<number>();
     for (const s of filteredSales) {
       const { year } = parseDateParts(s.date);
@@ -456,7 +549,6 @@ export default function SalesTrends() {
     }
     const years = Array.from(yearsSet).sort((a, b) => a - b);
 
-    // Pivot: {month: 'Jan', 2023: amount, 2024: amount, ...}
     const pivot: Record<string, Record<number, number>> = {};
     for (const label of MONTH_LABELS) pivot[label] = {};
 
@@ -508,6 +600,149 @@ export default function SalesTrends() {
       .slice(0, 10);
   }, [filteredSales, empMap]);
 
+  // ─── Product Performance data ────────────────────────────────────────────
+  const [prodYear, setProdYear] = useState("all");
+  const [prodMonth, setProdMonth] = useState("all");
+  const [prodRegion, setProdRegion] = useState("all");
+  const [prodDate, setProdDate] = useState("all");
+
+  const productPerfData = useMemo(() => {
+    // Filter sales to Accessories or Extended Warranty types
+    const typeKeywords = [
+      "accessory",
+      "accessories",
+      "extended warranty",
+      "warranty",
+    ];
+    const relevant = allSales.filter((s) => {
+      const typeLower = (s.type ?? "").toLowerCase();
+      if (!typeKeywords.some((k) => typeLower.includes(k))) return false;
+      const { year, month, day } = parseDateParts(s.date);
+      if (prodYear !== "all" && year !== Number(prodYear)) return false;
+      if (prodMonth !== "all" && month !== Number(prodMonth)) return false;
+      if (prodDate !== "all" && day !== Number(prodDate)) return false;
+      if (prodRegion !== "all") {
+        const region = empMap[s.fiplCode]?.region || "";
+        if (region !== prodRegion) return false;
+      }
+      return true;
+    });
+
+    // Group by product name
+    const map: Record<
+      string,
+      {
+        product: string;
+        type: string;
+        quantity: number;
+        amount: number;
+        region: string;
+      }
+    > = {};
+    for (const s of relevant) {
+      const key = `${s.product}||${s.type}`;
+      if (!map[key]) {
+        map[key] = {
+          product: s.product || "Unknown",
+          type: s.type || "Unknown",
+          quantity: 0,
+          amount: 0,
+          region: empMap[s.fiplCode]?.region || s.region || "—",
+        };
+      }
+      map[key].quantity += s.quantity;
+      map[key].amount += s.amount;
+    }
+
+    const sorted = Object.values(map).sort((a, b) => b.quantity - a.quantity);
+    const totalQty = sorted.reduce((acc, p) => acc + p.quantity, 0);
+    return sorted.map((p) => ({
+      ...p,
+      pct: totalQty > 0 ? Math.round((p.quantity / totalQty) * 100) : 0,
+    }));
+  }, [allSales, empMap, prodYear, prodMonth, prodRegion, prodDate]);
+
+  const PRODUCT_PIE_COLORS = [
+    "#6366f1",
+    "#10b981",
+    "#f59e0b",
+    "#ef4444",
+    "#8b5cf6",
+    "#06b6d4",
+    "#f97316",
+    "#ec4899",
+    "#84cc16",
+    "#14b8a6",
+  ];
+
+  // ─── Zero Sales Employees ────────────────────────────────────────────────
+  const zeroSalesData = useMemo(() => {
+    // Helper: strip BOM, NBSP, zero-width space, and all non-alphanumeric chars
+    // then lowercase — used for robust FIPL matching across both data sources.
+    const normFipl = (code: string) =>
+      code
+        .replace(/\uFEFF|\u00A0|\u200B|\u200C|\u200D|\u2060|\uFFFD/g, "") // explicit invisibles
+        .replace(/[^a-zA-Z0-9]/g, "") // strip remaining non-alphanumeric
+        .toLowerCase();
+
+    // Step 1 — Determine last uploaded month globally using local date parts.
+    // parseDateParts() uses local timezone getters so April in IST stays April.
+    let maxNumeric = -1;
+    let maxYear = -1;
+    let maxMonth = -1;
+    for (const s of allSales) {
+      if (!s.date) continue;
+      const { year, month } = parseDateParts(s.date);
+      if (Number.isNaN(year) || Number.isNaN(month)) continue;
+      const numeric = year * 12 + month;
+      if (numeric > maxNumeric) {
+        maxNumeric = numeric;
+        maxYear = year;
+        maxMonth = month;
+      }
+    }
+    if (maxYear === -1) return { employees: [], monthLabel: "—" };
+
+    const monthLbl = `${MONTH_LABELS[maxMonth - 1]} ${maxYear}`;
+
+    // Step 2 — Sum sales amounts per FIPL code for the last uploaded month.
+    // An employee "has sales" only if their total amount > 0 in that month.
+    // This correctly handles entries where amount = 0 (count them as zero-sales).
+    const salesSumByFipl = new Map<string, number>();
+    for (const s of allSales) {
+      if (!s.date || !s.fiplCode) continue;
+      const { year, month } = parseDateParts(s.date);
+      if (year === maxYear && month === maxMonth) {
+        const key = normFipl(s.fiplCode);
+        salesSumByFipl.set(
+          key,
+          (salesSumByFipl.get(key) ?? 0) + (s.amount ?? 0),
+        );
+      }
+    }
+
+    // Step 3 — Active employees in Employee Data whose total sales sum = 0
+    // (either no entries in last month OR all entries sum to 0).
+    // Status matching handles 'active', 'Active', 'ACTIVE', ' active ' etc.
+    const zeroEmployees = employees
+      .filter((e) => {
+        if (!e.fiplCode) return false;
+        const normalStatus = (e.status ?? "").toLowerCase().trim();
+        if (normalStatus !== "active") return false;
+        const key = normFipl(e.fiplCode);
+        const total = salesSumByFipl.get(key) ?? 0;
+        return total === 0;
+      })
+      .map((e) => ({
+        name: e.name,
+        fiplCode: e.fiplCode,
+        region: e.region || "—",
+        status: e.status,
+      }));
+
+    return { employees: zeroEmployees, monthLabel: monthLbl };
+  }, [allSales, employees]);
+
   // Pagination for transaction records
   const txTotalPages = Math.ceil(txFilteredSales.length / PAGE_SIZE);
   const txPaginatedSales = txFilteredSales.slice(
@@ -529,8 +764,209 @@ export default function SalesTrends() {
     { value: "daily", label: "Daily" },
   ];
 
+  // ─── Export handlers ──────────────────────────────────────────────────────
+
+  function handleExportTransactions() {
+    const activeFilters: Record<string, string> = {
+      Status: employeeStatusFilter,
+      Year: yearFilter,
+      Month:
+        monthFilter !== "all" ? MONTH_LABELS[Number(monthFilter) - 1] : "all",
+      "TX Year": txYearFilter,
+      "TX Month":
+        txMonthFilter !== "all"
+          ? MONTH_LABELS[Number(txMonthFilter) - 1]
+          : "all",
+      "TX Date": txDateFilter !== "all" ? txDateFilter : "all",
+      Region: regionFilter,
+    };
+
+    const totalAmt = txFilteredSales.reduce((acc, s) => acc + s.amount, 0);
+    const avgAmt =
+      txFilteredSales.length > 0
+        ? Math.round(totalAmt / txFilteredSales.length)
+        : 0;
+
+    exportToExcel({
+      filename: buildFilename("SalesTransactions", {
+        Status: employeeStatusFilter,
+        ...(txYearFilter !== "all" ? { Year: txYearFilter } : {}),
+        ...(txMonthFilter !== "all"
+          ? { Month: MONTH_LABELS[Number(txMonthFilter) - 1] }
+          : {}),
+      }),
+      filters: activeFilters,
+      sheets: [
+        {
+          name: "Summary",
+          isSummary: true,
+          data: [
+            { Key: "Export Date", Value: new Date().toLocaleString("en-IN") },
+            {
+              Key: "Filters Applied",
+              Value: formatFiltersForExport(activeFilters),
+            },
+            { Key: "Total Records", Value: txFilteredSales.length },
+            {
+              Key: "Total Sales Amount",
+              Value: `₹${totalAmt.toLocaleString("en-IN")}`,
+            },
+            {
+              Key: "Average Transaction Size",
+              Value: `₹${avgAmt.toLocaleString("en-IN")}`,
+            },
+          ],
+        },
+        {
+          name: "Transactions",
+          data: txFilteredSales.map((s) => {
+            const emp = empMap[s.fiplCode];
+            return {
+              date: formatDisplayDate(s.date),
+              employeeName: emp?.name || s.name || s.fiplCode,
+              fiplCode: s.fiplCode,
+              region: emp?.region || "—",
+              brand: s.brand || "—",
+              product: s.product || "—",
+              quantity: s.quantity,
+              amount: s.amount,
+            };
+          }),
+          columns: [
+            { key: "date", header: "Date", width: 18 },
+            { key: "employeeName", header: "Employee Name", width: 24 },
+            { key: "fiplCode", header: "FIPL Code", width: 14 },
+            { key: "region", header: "Region", width: 18 },
+            { key: "brand", header: "Brand", width: 18 },
+            { key: "product", header: "Product", width: 28 },
+            { key: "quantity", header: "Quantity", width: 12 },
+            { key: "amount", header: "Amount (₹)", width: 16 },
+          ],
+        },
+      ],
+    });
+  }
+
+  function handleExportZeroSales() {
+    const activeEmployees = employees.filter(
+      (e) => (e.status ?? "").toLowerCase().trim() === "active",
+    );
+    const zeroPct =
+      activeEmployees.length > 0
+        ? Math.round(
+            (zeroSalesData.employees.length / activeEmployees.length) * 100,
+          )
+        : 0;
+
+    exportToExcel({
+      filename: buildFilename("ZeroSalesEmployees", {
+        Month: zeroSalesData.monthLabel,
+      }),
+      filters: { Month: zeroSalesData.monthLabel },
+      sheets: [
+        {
+          name: "Summary",
+          isSummary: true,
+          data: [
+            { Key: "Export Date", Value: new Date().toLocaleString("en-IN") },
+            { Key: "Month", Value: zeroSalesData.monthLabel },
+            { Key: "Total Active Employees", Value: activeEmployees.length },
+            {
+              Key: "Zero Sales Count",
+              Value: zeroSalesData.employees.length,
+            },
+            { Key: "% Zero Sales", Value: `${zeroPct}%` },
+          ],
+        },
+        {
+          name: "ZeroSalesEmployees",
+          data: zeroSalesData.employees.map((e) => ({
+            name: e.name,
+            fiplCode: e.fiplCode,
+            region: e.region,
+            agent:
+              employees.find((em) => em.fiplCode === e.fiplCode)?.agentName ||
+              "—",
+            status: e.status || "Active",
+          })),
+          columns: [
+            { key: "name", header: "Employee Name", width: 24 },
+            { key: "fiplCode", header: "FIPL Code", width: 14 },
+            { key: "region", header: "Region", width: 18 },
+            { key: "agent", header: "Agent", width: 20 },
+            { key: "status", header: "Status", width: 12 },
+          ],
+        },
+      ],
+    });
+  }
+
+  function handleExportProducts() {
+    const topProduct =
+      productPerfData.length > 0 ? productPerfData[0].product : "—";
+    const activeFilters: Record<string, string> = {
+      Month: prodMonth !== "all" ? MONTH_LABELS[Number(prodMonth) - 1] : "all",
+      Year: prodYear,
+      Region: prodRegion,
+    };
+
+    exportToExcel({
+      filename: buildFilename("ProductPerformance", {
+        ...(prodMonth !== "all"
+          ? { Month: MONTH_LABELS[Number(prodMonth) - 1] }
+          : {}),
+        ...(prodYear !== "all" ? { Year: prodYear } : {}),
+        ...(prodRegion !== "all" ? { Region: prodRegion } : {}),
+      }),
+      filters: activeFilters,
+      sheets: [
+        {
+          name: "Summary",
+          isSummary: true,
+          data: [
+            { Key: "Export Date", Value: new Date().toLocaleString("en-IN") },
+            {
+              Key: "Filters Applied",
+              Value: formatFiltersForExport(activeFilters),
+            },
+            { Key: "Total Products Listed", Value: productPerfData.length },
+            { Key: "Top Product (by Qty)", Value: topProduct },
+          ],
+        },
+        {
+          name: "Products",
+          data: productPerfData.map((p) => ({
+            product: p.product,
+            quantity: p.quantity,
+            amount: p.amount,
+            share: `${p.pct}%`,
+          })),
+          columns: [
+            { key: "product", header: "Product Name", width: 32 },
+            { key: "quantity", header: "Quantity Sold", width: 16 },
+            { key: "amount", header: "Sales Amount (₹)", width: 20 },
+            { key: "share", header: "% Share", width: 12 },
+          ],
+        },
+      ],
+    });
+  }
+
   return (
     <div className="space-y-6">
+      {pendingExportKey && (
+        <PasswordGate
+          gateKey="export"
+          onUnlock={() => {
+            const key = pendingExportKey;
+            setPendingExportKey(null);
+            if (key === "transactions") handleExportTransactions();
+            else if (key === "zeroSales") handleExportZeroSales();
+            else if (key === "products") handleExportProducts();
+          }}
+          onCancel={() => setPendingExportKey(null)}
+        />
+      )}
       {/* Header */}
       <motion.div
         initial={{ opacity: 0, y: -8 }}
@@ -566,7 +1002,7 @@ export default function SalesTrends() {
               <SelectTrigger className="w-32" data-ocid="year.select">
                 <SelectValue placeholder="Year" />
               </SelectTrigger>
-              <SelectContent className="max-h-56 overflow-y-auto">
+              <SelectContent className="max-h-56 overflow-y-auto overscroll-contain">
                 <SelectItem value="all">All Years</SelectItem>
                 {availableYears.map((y) => (
                   <SelectItem key={y} value={String(y)}>
@@ -586,7 +1022,7 @@ export default function SalesTrends() {
               <SelectTrigger className="w-36" data-ocid="month.select">
                 <SelectValue placeholder="Month" />
               </SelectTrigger>
-              <SelectContent className="max-h-56 overflow-y-auto">
+              <SelectContent className="max-h-56 overflow-y-auto overscroll-contain">
                 <SelectItem value="all">All Months</SelectItem>
                 {MONTH_LABELS.map((label, i) => (
                   <SelectItem key={label} value={String(i + 1)}>
@@ -606,7 +1042,7 @@ export default function SalesTrends() {
               <SelectTrigger className="w-28" data-ocid="day.select">
                 <SelectValue placeholder="Day" />
               </SelectTrigger>
-              <SelectContent className="max-h-56 overflow-y-auto">
+              <SelectContent className="max-h-56 overflow-y-auto overscroll-contain">
                 <SelectItem value="all">All Days</SelectItem>
                 {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
                   <SelectItem key={String(d)} value={String(d)}>
@@ -625,7 +1061,7 @@ export default function SalesTrends() {
               <SelectTrigger className="w-36" data-ocid="region.select">
                 <SelectValue placeholder="Region" />
               </SelectTrigger>
-              <SelectContent className="max-h-56 overflow-y-auto">
+              <SelectContent className="max-h-56 overflow-y-auto overscroll-contain">
                 <SelectItem value="all">All Regions</SelectItem>
                 {availableRegions.map((r) => (
                   <SelectItem key={r} value={r}>
@@ -641,6 +1077,20 @@ export default function SalesTrends() {
                 value={fseFilter}
                 onChange={(v) => {
                   setFseFilter(v);
+                }}
+              />
+            </div>
+
+            {/* Employee Status Filter */}
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-muted-foreground font-medium whitespace-nowrap">
+                Status:
+              </span>
+              <EmployeeStatusToggle
+                value={employeeStatusFilter}
+                onChange={(v) => {
+                  setEmployeeStatusFilter(v);
+                  setTxPage(0);
                 }}
               />
             </div>
@@ -695,6 +1145,11 @@ export default function SalesTrends() {
                   </p>
                   <p className="text-xs text-muted-foreground mt-1 flex items-center gap-1">
                     <TrendingUp className="w-3 h-3" /> Total Amount
+                    {employeeStatusFilter !== "all" && (
+                      <Badge variant="secondary" className="ml-1 text-[10px]">
+                        {employeeStatusFilter}
+                      </Badge>
+                    )}
                   </p>
                 </CardContent>
               </Card>
@@ -739,7 +1194,7 @@ export default function SalesTrends() {
 
       {/* Chart Tabs */}
       <Tabs defaultValue="trend" data-ocid="charts.tab">
-        <TabsList className="mb-4">
+        <TabsList className="mb-4 flex-wrap">
           <TabsTrigger value="trend" data-ocid="charts.trend.tab">
             <TrendingUp className="w-3.5 h-3.5 mr-1.5" />
             Sales Trend
@@ -751,6 +1206,10 @@ export default function SalesTrends() {
           <TabsTrigger value="fse" data-ocid="charts.fse.tab">
             <Users className="w-3.5 h-3.5 mr-1.5" />
             FSE-wise
+          </TabsTrigger>
+          <TabsTrigger value="products" data-ocid="charts.products.tab">
+            <Package className="w-3.5 h-3.5 mr-1.5" />
+            Product Performance
           </TabsTrigger>
         </TabsList>
 
@@ -1040,12 +1499,359 @@ export default function SalesTrends() {
             </CardContent>
           </Card>
         </TabsContent>
+
+        {/* Tab 4: Product Performance */}
+        <TabsContent value="products">
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Package className="w-4 h-4 text-violet-500" />
+                Product Performance — Accessories &amp; Extended Warranty
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {/* Product filters */}
+              <div
+                className="flex flex-wrap gap-3 mb-5 pb-4 border-b"
+                data-ocid="prod_filters.panel"
+              >
+                <Select value={prodYear} onValueChange={setProdYear}>
+                  <SelectTrigger className="w-32" data-ocid="prod_year.select">
+                    <SelectValue placeholder="Year" />
+                  </SelectTrigger>
+                  <SelectContent className="max-h-56 overflow-y-auto overscroll-contain">
+                    <SelectItem value="all">All Years</SelectItem>
+                    {availableYears.map((y) => (
+                      <SelectItem key={y} value={String(y)}>
+                        {y}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select value={prodMonth} onValueChange={setProdMonth}>
+                  <SelectTrigger className="w-36" data-ocid="prod_month.select">
+                    <SelectValue placeholder="Month" />
+                  </SelectTrigger>
+                  <SelectContent className="max-h-56 overflow-y-auto overscroll-contain">
+                    <SelectItem value="all">All Months</SelectItem>
+                    {MONTH_LABELS.map((label, i) => (
+                      <SelectItem key={label} value={String(i + 1)}>
+                        {label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select value={prodRegion} onValueChange={setProdRegion}>
+                  <SelectTrigger
+                    className="w-36"
+                    data-ocid="prod_region.select"
+                  >
+                    <SelectValue placeholder="Region" />
+                  </SelectTrigger>
+                  <SelectContent className="max-h-56 overflow-y-auto overscroll-contain">
+                    <SelectItem value="all">All Regions</SelectItem>
+                    {availableRegions.map((r) => (
+                      <SelectItem key={r} value={r}>
+                        {r}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select value={prodDate} onValueChange={setProdDate}>
+                  <SelectTrigger className="w-28" data-ocid="prod_date.select">
+                    <SelectValue placeholder="Date" />
+                  </SelectTrigger>
+                  <SelectContent className="max-h-56 overflow-y-auto overscroll-contain">
+                    <SelectItem value="all">All Dates</SelectItem>
+                    {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
+                      <SelectItem key={String(d)} value={String(d)}>
+                        {d}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Badge variant="outline" className="self-center text-xs">
+                  {productPerfData.length} products ·{" "}
+                  {productPerfData.reduce((a, p) => a + p.quantity, 0)} units
+                </Badge>
+                {productPerfData.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (exportGranted) handleExportProducts();
+                      else setPendingExportKey("products");
+                    }}
+                    data-ocid="products.export_button"
+                    className="ml-auto flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-indigo-300 text-indigo-600 bg-background rounded-md hover:bg-indigo-600 hover:text-white transition-colors"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    Export
+                  </button>
+                )}
+              </div>
+
+              {isLoading ? (
+                <Skeleton className="h-[300px] w-full" />
+              ) : productPerfData.length === 0 ? (
+                <div
+                  className="h-[200px] flex flex-col items-center justify-center text-muted-foreground text-sm gap-2"
+                  data-ocid="products_chart.empty_state"
+                >
+                  <Package className="w-8 h-8 opacity-20" />
+                  No accessory or extended warranty data for selected filters
+                </div>
+              ) : (
+                <div className="space-y-6">
+                  {/* Pie Chart — full width on top */}
+                  <div>
+                    <h4 className="text-sm font-medium mb-3 text-muted-foreground">
+                      % Share by Quantity Sold
+                    </h4>
+                    <ResponsiveContainer width="100%" height={320}>
+                      <PieChart>
+                        <Pie
+                          data={productPerfData.slice(0, 10)}
+                          dataKey="quantity"
+                          nameKey="product"
+                          cx="50%"
+                          cy="50%"
+                          outerRadius={130}
+                          label={({
+                            name,
+                            pct,
+                          }: { name: string; pct: number }) => {
+                            const truncated =
+                              name.length > 12 ? `${name.slice(0, 12)}…` : name;
+                            return `${truncated} (${pct}%)`;
+                          }}
+                          labelLine={false}
+                        >
+                          {productPerfData.slice(0, 10).map((entry, idx) => (
+                            <Cell
+                              key={`cell-prod-${entry.product}-${idx}`}
+                              fill={
+                                PRODUCT_PIE_COLORS[
+                                  idx % PRODUCT_PIE_COLORS.length
+                                ]
+                              }
+                            />
+                          ))}
+                        </Pie>
+                        <Tooltip
+                          formatter={(val: number, name: string) => [
+                            `${val} units`,
+                            name,
+                          ]}
+                          contentStyle={{ fontSize: 12 }}
+                        />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+
+                  {/* Full Product Table below the chart */}
+                  <div>
+                    <h4 className="text-sm font-semibold mb-3 flex items-center gap-2">
+                      <Package className="w-4 h-4 text-violet-500" />
+                      Product Breakdown
+                      <span className="text-xs text-muted-foreground font-normal ml-auto">
+                        Sorted by Quantity (Highest First)
+                      </span>
+                    </h4>
+                    <div className="rounded-xl border overflow-hidden">
+                      <div className="overflow-y-auto max-h-[400px]">
+                        <table className="w-full text-sm">
+                          <thead className="sticky top-0 bg-muted/60 border-b">
+                            <tr>
+                              <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                                #
+                              </th>
+                              <th className="text-left px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                                Product Name
+                              </th>
+                              <th className="text-right px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                                Qty Sold
+                              </th>
+                              <th className="text-right px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                                Sales Amount
+                              </th>
+                              <th className="text-right px-4 py-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                                Share
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {productPerfData.map((p, i) => (
+                              <tr
+                                key={`${p.product}-${p.type}`}
+                                className="border-b hover:bg-muted/20 transition-colors"
+                                data-ocid={`products_table.item.${i + 1}`}
+                              >
+                                <td className="px-4 py-3 text-muted-foreground font-mono text-xs">
+                                  {i + 1}
+                                </td>
+                                <td className="px-4 py-3">
+                                  <div className="font-medium text-foreground">
+                                    {p.product || "—"}
+                                  </div>
+                                  <div className="text-xs text-muted-foreground mt-0.5">
+                                    <Badge
+                                      variant="outline"
+                                      className={`text-[10px] px-1 py-0 ${p.type.toLowerCase().includes("warranty") ? "border-purple-300 text-purple-700" : "border-emerald-300 text-emerald-700"}`}
+                                    >
+                                      {p.type || "—"}
+                                    </Badge>
+                                  </div>
+                                </td>
+                                <td className="px-4 py-3 text-right tabular-nums font-bold text-foreground">
+                                  {p.quantity.toLocaleString()}
+                                </td>
+                                <td className="px-4 py-3 text-right tabular-nums font-semibold text-emerald-700">
+                                  ₹{p.amount.toLocaleString("en-IN")}
+                                </td>
+                                <td className="px-4 py-3 text-right tabular-nums text-muted-foreground">
+                                  <div className="flex items-center justify-end gap-2">
+                                    <div className="w-16 h-1.5 rounded-full bg-muted overflow-hidden">
+                                      <div
+                                        className="h-full rounded-full bg-indigo-500"
+                                        style={{ width: `${p.pct}%` }}
+                                      />
+                                    </div>
+                                    <span className="text-xs">{p.pct}%</span>
+                                  </div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
       </Tabs>
+
+      {/* Zero Sales Employees Table */}
+      <Card data-ocid="zero_sales.card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base flex items-center gap-2">
+            <UserX className="w-4 h-4 text-red-500" />
+            Zero Sales Employees
+            <Badge variant="secondary" className="ml-auto text-xs">
+              {zeroSalesData.monthLabel}
+            </Badge>
+            {zeroSalesData.employees.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (exportGranted) handleExportZeroSales();
+                  else setPendingExportKey("zeroSales");
+                }}
+                data-ocid="zero_sales.export_button"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-indigo-300 text-indigo-600 bg-background rounded-md hover:bg-indigo-600 hover:text-white transition-colors"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Export
+              </button>
+            )}
+          </CardTitle>
+          <p className="text-xs text-muted-foreground">
+            Active employees with no sales entries in {zeroSalesData.monthLabel}{" "}
+            · {zeroSalesData.employees.length} employee
+            {zeroSalesData.employees.length !== 1 ? "s" : ""}
+          </p>
+        </CardHeader>
+        <CardContent className="p-0">
+          {isLoading ? (
+            <div className="p-4 space-y-2">
+              {[1, 2, 3].map((k) => (
+                <Skeleton key={k} className="h-8 w-full" />
+              ))}
+            </div>
+          ) : zeroSalesData.employees.length === 0 ? (
+            <div
+              className="flex flex-col items-center justify-center py-10 text-muted-foreground text-sm gap-2"
+              data-ocid="zero_sales.empty_state"
+            >
+              <Users className="w-8 h-8 opacity-20" />
+              All active employees have at least one sale this month 🎉
+            </div>
+          ) : (
+            <div className="overflow-x-auto max-h-72 overflow-y-auto">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-muted/40">
+                  <tr className="border-b">
+                    <th className="text-left px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                      #
+                    </th>
+                    <th className="text-left px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                      Employee Name
+                    </th>
+                    <th className="text-left px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                      FIPL Code
+                    </th>
+                    <th className="text-left px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                      Region
+                    </th>
+                    <th className="text-left px-4 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                      Status
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {zeroSalesData.employees.map((e, i) => (
+                    <tr
+                      key={e.fiplCode}
+                      className="border-b hover:bg-muted/20 transition-colors"
+                      data-ocid={`zero_sales.item.${i + 1}`}
+                    >
+                      <td className="px-4 py-3 text-muted-foreground text-xs">
+                        {i + 1}
+                      </td>
+                      <td className="px-4 py-3 font-medium">{e.name}</td>
+                      <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
+                        {e.fiplCode}
+                      </td>
+                      <td className="px-4 py-3 text-sm">{e.region}</td>
+                      <td className="px-4 py-3">
+                        <Badge
+                          variant="outline"
+                          className="text-xs border-emerald-200 text-emerald-700 bg-emerald-50"
+                        >
+                          {e.status}
+                        </Badge>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Transaction Records */}
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-base">Transaction Records</CardTitle>
+          <CardTitle className="text-base flex items-center gap-2">
+            Transaction Records
+            {txFilteredSales.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (exportGranted) handleExportTransactions();
+                  else setPendingExportKey("transactions");
+                }}
+                data-ocid="transactions.export_button"
+                className="ml-auto flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium border border-indigo-300 text-indigo-600 bg-background rounded-md hover:bg-indigo-600 hover:text-white transition-colors"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Export
+              </button>
+            )}
+          </CardTitle>
         </CardHeader>
         <CardContent>
           {/* Transaction-specific filters */}
@@ -1069,7 +1875,7 @@ export default function SalesTrends() {
               <SelectTrigger className="w-32" data-ocid="tx_year.select">
                 <SelectValue placeholder="Year" />
               </SelectTrigger>
-              <SelectContent className="max-h-56 overflow-y-auto">
+              <SelectContent className="max-h-56 overflow-y-auto overscroll-contain">
                 <SelectItem value="all">All Years</SelectItem>
                 {txAvailableYears.map((y) => (
                   <SelectItem key={y} value={String(y)}>
@@ -1090,7 +1896,7 @@ export default function SalesTrends() {
               <SelectTrigger className="w-36" data-ocid="tx_month.select">
                 <SelectValue placeholder="Month" />
               </SelectTrigger>
-              <SelectContent className="max-h-56 overflow-y-auto">
+              <SelectContent className="max-h-56 overflow-y-auto overscroll-contain">
                 <SelectItem value="all">All Months</SelectItem>
                 {MONTH_LABELS.map((label, i) => (
                   <SelectItem key={label} value={String(i + 1)}>
@@ -1111,7 +1917,7 @@ export default function SalesTrends() {
               <SelectTrigger className="w-28" data-ocid="tx_date.select">
                 <SelectValue placeholder="Date" />
               </SelectTrigger>
-              <SelectContent className="max-h-56 overflow-y-auto">
+              <SelectContent className="max-h-56 overflow-y-auto overscroll-contain">
                 <SelectItem value="all">All Dates</SelectItem>
                 {txAvailableDays.map((d) => (
                   <SelectItem key={String(d)} value={String(d)}>

@@ -22,6 +22,7 @@ export interface EmployeeRecord {
   familyDetails: string | null;
   pastExperience: string | null;
   vehicleDetails: string | null;
+  agentName: string | null;
 
   pulseData: Record<string, string> | null; // question -> answer
   prismData: Record<string, string> | null; // question -> answer
@@ -70,6 +71,7 @@ export interface EmployeeRecord {
     product: string | null;
     cesScore: number;
     remark: string | null;
+    dateOfVisit: string | null;
     dateOfCall: string | null;
     agent: string | null;
     typeOfIssue: string | null;
@@ -199,6 +201,9 @@ async function fetchAllData(): Promise<AllData> {
       ),
       vehicleDetails: normalizeText(
         cell(row, empSheet.headers, "Vehicle Details", "Vehicle"),
+      ),
+      agentName: normalizeText(
+        cell(row, empSheet.headers, "Agent Name", "Agent"),
       ),
       performance: null,
       swot: null,
@@ -446,6 +451,9 @@ async function fetchAllData(): Promise<AllData> {
       cesScore: parseNumber(cell(row, callSheet.headers, "CES Score", "CES")),
       remark: normalizeText(
         cell(row, callSheet.headers, "Remark", "Remarks", "Notes"),
+      ),
+      dateOfVisit: parseDate(
+        cell(row, callSheet.headers, "Date of Visit", "Visit Date"),
       ),
       dateOfCall: parseDate(
         cell(row, callSheet.headers, "Date of Call", "Call Date", "Date"),
